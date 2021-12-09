@@ -1,13 +1,13 @@
 # Defines Array IR to model array abstractions
 
 # A * B
-@noinline function ArrayDot(A::StubArray{S, T, N}, B::StubArray{S2, T2, N2}) where {S, S2, T, T2, N, N2}
-    StubArray{S, T, N}()
+@noinline function ArrayDot(A::StubArray{Tuple{M, K}, T, N1}, B::StubArray{Tuple{K, N}, T2, N2}) where {M, N, K, T, T2, N1, N2}
+    StubArray{Tuple{M, N}, T, N1}()
 end
 
 # A + B
-@noinline function ArrayPlus(A::StubArray{S, T, N}, B::StubArray{S2, T2, N2}) where {S, S2, T, T2, N, N2}
-    StubArray{S, T, N}()
+@noinline function ArrayPlus(A::StubArray{Tuple{M, N}, T, N1}, B::StubArray{Tuple{M, N}, T2, N2}) where {M, N, T, T2, N1, N2}
+    StubArray{Tuple{M, N}, T, N1}()
 end
 
 # A * B + C

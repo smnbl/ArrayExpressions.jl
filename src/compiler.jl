@@ -46,6 +46,8 @@ function transform_gemm(ci)
         # TODO: make sure ArrayDot is only used as argument for ArrayMul
         # -> needs use-def info -> look at compiler passes
         code_new[loc_dot] = Expr(:call, :+, 0) # NOP ArrayDot
+
+        # TODO: BUG doesnt fix assignations!!
         code_new[idx] = Expr(:call, ArrayGemm, A, B, C) # ArrayDot -> ArrayMul
     end
 
@@ -54,3 +56,23 @@ function transform_gemm(ci)
     ci.code = code_new
     ci
 end
+
+# taken from CodeInfoTools
+# TODO: check how this works, is this alright?
+function verify(src::Core.CodeInfo)
+    Core.Compiler.validate_code(src)
+    @assert(!isempty(src.linetable))
+end
+
+function lambda(m::Module, ci::Core.CodeInfo)
+    ci = copy(ci)
+    verify(ci)
+    inds = findall(==(0x00), ci.slotflags)
+    @assert(inds !== nothing)
+    args = getindex(ci.slotnames, inds)[2: end]
+    @eval m @generated function $(gensym())($(args...))
+        return $ci
+    end
+end
+
+lambda(ci::Core.CodeInfo) = lambda(Main, ci)
