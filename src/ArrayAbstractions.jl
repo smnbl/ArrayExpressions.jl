@@ -2,6 +2,6 @@ module ArrayAbstractions
 
 include("array.jl")
 include("ir.jl")
-include("compiler.jl")
+include("interface.jl")
 
 end # module

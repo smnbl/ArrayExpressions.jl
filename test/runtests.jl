@@ -1,5 +1,5 @@
 using ArrayAbstractions
-using ArrayAbstractions: StubArray, ArrayDot, ArrayPlus, ArrayGemm
+using ArrayAbstractions: StubArray, ArrayDot, ArrayPlus, ArrayGemm, codegen
 
 @info "testing GEMM optim"
 
@@ -9,11 +9,16 @@ B = StubArray{Tuple{K, N}, Int}()
 C = StubArray{Tuple{M, N}, Int}()
 
 function f() 
+    (M, N, K) = (10, 20, 30)
+    A = StubArray{Tuple{M, K}, Int}()
+    B = StubArray{Tuple{K, N}, Int}()
+    C = StubArray{Tuple{M, N}, Int}()
     X = 10
-    return ArrayPlus(ArrayDot(A, B), C)
+    F = ArrayDot(A, B)
+    return ArrayPlus(F, C)
 end
 
-ci_new = optimize(f, ())
+typed = codegen(:llvm, f, Tuple{}, Core.svec())
 
-println(typeof(f()))
-println(typeof(ArrayAbstractions.lambda(ci_new)()))
+f()
+println(typed)
