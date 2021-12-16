@@ -1,5 +1,17 @@
 # Julia Compiler - An Overview
+
+```
+ Function
+    ↓
+ Method
+    ↓
+MethodInstance: uninferred code
+    ↓
+CodeInstance: inferred code
+```
+
 ## conceptual code transformations that take place in the compiler
+
 1. surface syntax AST (structured representation of code as it is written) constructed by `julia-parser.scm`
 2. lowered form IR is constructed by `julia-syntax.scm`
 3. optimizations (like inlining)
@@ -7,6 +19,7 @@
 5. code generation
 
 ### more detail with functions called:
+
 see: [julia init](https://docs.julialang.org/en/v1/devdocs/init/)
 1. `Base._start` parses input with `parse()` to generate CodeInfo lowered source (MethodInstance) (ast.c)
     1. parse_all() -> parse() -> invokes julia-parser.scm
@@ -23,6 +36,7 @@ Julia code -lowering> CodeInfo
 -> CodeInfo
 
 ## Function -> generated code
+
 see: [julia ast](https://docs.julialang.org/en/v1/devdocs/ast/)
 
 - atypes: argument types ~ this stores the types of the arguments!
@@ -32,11 +46,13 @@ see: [julia ast](https://docs.julialang.org/en/v1/devdocs/ast/)
 ## Function =atypes, sparams=> Method 
 
 ## Metho =specializations=> MethodInstance
+
 - `backedges`: used for cache (contains CodeInstances) invalidation, reverse-list of cache dependencies, it tracks all the MethodInstances that have been inferred or optimized that contain a possible call to this `MethodInstance`
 
 ! MethodInstances hold uninferred code (within their `.uninferred` field), inference creates CodeInstances and populates the cache (for 'a toplevel thunk' tho ??)!
 
 ## MethodInstance =cache=> CodeInstance
+
 - `inferred`: contains inferred source (CodeInfo?) or nothing to indicate `rettype` is inferred
 - `ftpr`: jlcall entry point
 - `min_world` / `max_world`: range of world ages this method instance is valid to be called, if `max_world` is the special token value `-1` -> value is not yet known
@@ -49,7 +65,13 @@ hooks in at third step by defining new NativeInterpreter
 6. irgen (happens in `irgen` (irgen.jl) called by)
 
 ### optim.jl
+
 contains LLVM optimization passes (in same spirit as Julia's optimization pipeline)
 
 ## tfuncs.jl
-`tfunc` is an inference lookup table for Julia's intrinsic & builtin functions, see `base/compiler/tfuncs.jl`
+
+`tfunc` is an inference lookup table for Julia's intrinsic & builtin functions, see `base/compiler/tfuncs.jl`, it tells the compiler the return type of something which it will blindly trust!
+
+## invoke vs call
+- invoke: static dispatch, preselected on MethodInstance
+- call: still has to specialize the function to a MethodInstance
