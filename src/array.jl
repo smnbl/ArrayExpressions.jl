@@ -1,5 +1,7 @@
 # define a stub array type
-
+# TODO
+# mark IR as intrinsic -> how do we do this?
+#
 struct StubArray{S <: Tuple, T, N} <: AbstractArray{T, N}
 end
 

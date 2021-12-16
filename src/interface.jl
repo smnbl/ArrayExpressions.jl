@@ -1,6 +1,6 @@
 # interface with the julia compiler
 
-using Core.Compiler: MethodInstance
+using Core.Compiler: MethodInstance, CodeInfo, IRCode
 
 const C = Core
 const CC = Core.Compiler
@@ -112,7 +112,6 @@ function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params
         resolve(lhs.args[2]) == ArrayDot || continue
 
         println("replacing :)")
-        println(lhs.args)
 
         # get GEMM arguments
         A = lhs.args[3]
@@ -131,9 +130,14 @@ function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params
 end
 
 ## LLVM IR Generation
-#
 
 ## PUTTING IT ALL TOGETHER
+## TODO: idea to trap inference -> reset typeinf_func using jl_set_typeinf_func
+
+typeinf(mi::MethodInstance, world::UInt) = CC.typeinf_ext_toplevel(ArrayInterpreter(world), mi)
+ccall(:jl_set_typeinf_func, Cvoid, (Any,), typeinf)
+
+#
 function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
     @info "Emitting Julia"
     mi = emit_julia(f, atype, sparams)
