@@ -46,7 +46,10 @@ see: [julia ast](https://docs.julialang.org/en/v1/devdocs/ast/)
 hooks in at third step by defining new NativeInterpreter
 4. perform type inference (`ci_cache_populate` called by `compile_method_instance`)
 5. codegen (called from `compile_method_instance` called by `irgen`)
-6. irgen (happens in `irgen` (irgen.jl) called by `
+6. irgen (happens in `irgen` (irgen.jl) called by)
 
 ### optim.jl
 contains LLVM optimization passes (in same spirit as Julia's optimization pipeline)
+
+## tfuncs.jl
+`tfunc` is an inference lookup table for Julia's intrinsic & builtin functions, see `base/compiler/tfuncs.jl`
