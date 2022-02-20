@@ -5,6 +5,8 @@ using Core.Compiler: MethodInstance, CodeInfo, IRCode
 const C = Core
 const CC = Core.Compiler
 
+export @array_opt
+
 # JULIA IR
 function emit_julia(f, @nospecialize(atype), sparams::C.SimpleVector)
     sig = CC.signature_type(f, atype)
@@ -70,61 +72,22 @@ function CC.add_remark!(ai::ArrayInterpreter, sv::CC.InferenceState, msg)
     @debug "Inference remark during array compilation of $(sv.linfo): $msg"
 end
 
-# resolve globalref to global variable (function, struct, variables, ...)
-resolve(gr::GlobalRef) = getproperty(gr.mod, gr.name)
+macro array_opt(ex)
+    esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
+end
 
 function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, @nospecialize(result))
-    @info "optimizing..."
     nargs = Int(opt.nargs) - 1
 
     # TODO: interface changed in 1.8
     ir = CC.run_passes(opt.src, nargs, opt)
 
-    ### perform optimization?
-    # outline:
-    #   1. replace (dot matrix matrix) -> (gemm matrix matrix)
-    #   2. replace (plus (gemm matrix matrix) matrix) -> (gemm matrix matrix matrix)
-    #
-    inst_stream = ir.stmts
-    for (idx, stmt) in enumerate(inst_stream.inst)
-        stmt isa Expr || continue
-        if stmt.head == :(=)
-            stmt = stmt.args[2]
-        end
+    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
 
-        stmt isa Expr || continue
-
-        # TODO: also support :call in case dynamic dispatched?
-        stmt.head == :invoke || continue
-
-        # in invoke, function ref is in second argument
-        stmt.args[2] isa GlobalRef || continue
-        resolve(stmt.args[2]) == ArrayPlus || continue
-
-        loc_dot = stmt.args[3].id
-
-        lhs = inst_stream.inst[loc_dot]
-        lhs isa Expr || continue
-        lhs.head == :invoke || continue
-
-        # in invoke, function ref is in second argument
-        lhs.args[2] isa GlobalRef || continue
-        resolve(lhs.args[2]) == ArrayDot || continue
-
-        println("replacing :)")
-
-        # get GEMM arguments
-        A = lhs.args[3]
-        B = lhs.args[4]
-        C = stmt.args[4]
-
-        # TODO: make sure ArrayDot is only used as argument for ArrayMul
-        # -> needs use-def info -> look at compiler passes
-        CC.setindex!(ir, Expr(:call, :+, 0), CC.SSAValue(loc_dot))# NOP ArrayDot
-        CC.setindex!(ir, Expr(:call, ArrayGemm, A, B, C), CC.SSAValue(idx)) # perform replacement
+    if (perform_array_opt)
+        println("array_opt")
+        extract_array_ir(ir)
     end
-
-    ###
 
     CC.finish(interp, opt, params, ir, result)
 end
@@ -133,11 +96,12 @@ end
 
 ## PUTTING IT ALL TOGETHER
 ## TODO: idea to trap inference -> reset typeinf_func using jl_set_typeinf_func
-
 typeinf(mi::MethodInstance, world::UInt) = CC.typeinf_ext_toplevel(ArrayInterpreter(world), mi)
-ccall(:jl_set_typeinf_func, Cvoid, (Any,), typeinf)
 
-#
+function inject_typeinf()
+    ccall(:jl_set_typeinf_func, Cvoid, (Any,), typeinf)
+end
+
 function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
     @info "Emitting Julia"
     mi = emit_julia(f, atype, sparams)
