@@ -1,3 +1,4 @@
+
 # extract expression that resolves to #indx SSA value
 # TODO: handle phi nodes
 function _extract_ir(ir::IRCode, value::SSAValue; visited=Set())
@@ -53,7 +54,7 @@ function extract_array_ir(ir::IRCode)
         stmt.head == :invoke || stmt.head == :call || continue
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(ir.stmts.type[idx])
-        rettype <: StubArray || continue
+        rettype <: AbstractGPUArray || continue
 
         print("$(idx) = ");
         visited, arir = _extract_ir(ir, SSAValue(idx), visited=visited)

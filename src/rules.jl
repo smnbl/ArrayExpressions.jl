@@ -3,7 +3,7 @@ using Metatheory
 # Define Metatheory rules
 const custom_kernel_rules = @theory A B C begin
     # GEMM
-    ArrayPlus(ArrayDot(A, B), C) --> ArrayGemm(A, B, C)
+    (+)((*)(A, B), C) --> ArrayGemm(A, B, C)
     # TODO: add map(reduce()) -> mapreduce() rule
 end
 
