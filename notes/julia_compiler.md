@@ -68,10 +68,24 @@ hooks in at third step by defining new NativeInterpreter
 
 contains LLVM optimization passes (in same spirit as Julia's optimization pipeline)
 
-## tfuncs.jl
+## Intrinsics & Builtin functions
+Intrinsics & builtin functions are implemented in c/cpp.
+They are mapped to Julia functions and behave like normal julia functions to the user.
+Referenced by a `jl_f_...` symbol.
 
+### Julia's inlining cost-model
+see also: [The inlining algorithm](https://docs.julialang.org/en/v1/devdocs/inference/)
+
+To calculate the associated cost of a function invocation (mapped to a code instance object), cost is ~ calculated as follows:
+- every `:invoke` intrinsic (a call for which all the inputs and outputs were succesfully inferred) is mapped to a fixed cost of 20 cycles
+- while an `:call` (for functions other than builtins/intrinsics!!) invocation still requires dynamic dispatch, thus the associated cost will be much higher: ~ 1000 cycles!!!
+
+## tfuncs.jl
 `tfunc` is an inference lookup table for Julia's intrinsic & builtin functions, see `base/compiler/tfuncs.jl`, it tells the compiler the return type of something which it will blindly trust!
+Tfunc seems short for **transfer function**, they define the type transfer functions to use when type inferring intrinsic & builtin functions.
 
 ## invoke vs call
 - invoke: static dispatch, preselected on MethodInstance
 - call: still has to specialize the function to a MethodInstance
+
+
