@@ -1,71 +1,130 @@
-
 # extract expression that resolves to #indx SSA value
-# TODO: handle phi nodes
-function _extract_ir(ir::IRCode, value::SSAValue; visited=Set())
-    inst = ir.stmts.inst[value.id]
-    type = ir.stmts.type[value.id]
+# TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
+# visited: set of already visited notes
+function _extract_ir(ir::IRCode, loc::SSAValue; visited=Set())
+    inst = ir.stmts[loc.id][:inst]
+    type = ir.stmts[loc.id][:type]
 
-    push!(visited, value.id)
+    push!(visited, loc.id)
+    inputs = Set{InputTypes}()
 
-    if (inst isa Expr)
+    if CC.isexpr(inst, :call) || CC.isexpr(inst, :invoke)
         args_op = []
         args_type = []
         start = if inst.head == :call 2 else 3 end
+
         for arg in inst.args[start:end]
-            if arg isa SSAValue
+            # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
+            type = CC.widenconst(CC.argextype(arg, ir, ir.sptypes, ir.argtypes))
+            if !(type <: AbstractGPUArray)
+                push!(args_op, Expr(:input, arg))
+                push!(args_type, Expr(:input, type))
+                push!(inputs, arg)
+            else
                 # TODO: stop at functions with side effects?
-                visited, arir = _extract_ir(ir, arg, visited=visited)
+                # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
+                visited, arir, extra_inputs = _extract_ir(ir, arg, visited=visited)
                 push!(args_op, arir.op_expr)
                 push!(args_type, arir.type_expr)
-            else
-                println("not ssa but: $(typeof(arg))")
+                union!(inputs, extra_inputs)
             end
         end
 
         # widenconst: converst Const(Type) -> Type ?
         # TODO: GlobalRefs have to be resolved (to Functions?)
         func = if inst.head == :call inst.args[1] else inst.args[2] end
-        return visited, ArrayIR(Expr(:call, resolve(func), args_op...), Expr(:call, Symbol(CC.widenconst(type)), args_type...))
-    elseif inst isa CC.PhiNode
-        # TODO, atm we stop at phi-nodes
-        println("phi node")
-        println(inst)
-        return visited, ArrayIR(Expr(:phinode), Expr(:phinode))
-    elseif inst isa CC.GlobalRef
-        return visited, ArrayIR(Expr(:GlobalRef), Expr(:GlobalRef))
+        return visited, ArrayIR(Expr(:call, resolve(func), args_op...), Expr(:call, Symbol(CC.widenconst(type)), args_type...)), inputs
+    elseif inst isa CC.PhiNode || inst isa CC.GlobalRef
+        push!(inputs, loc)
+        type = CC.widenconst(CC.argextype(inst, ir, ir.sptypes, ir.argtypes))
+        return visited, ArrayIR(Expr(:input, inst), Expr(:input, type)), inputs
     else
-        println("not an expr, but: $(typeof(inst))")
-        return visited, ArrayIR(Expr(:invalid), Expr(:invalid))
+        println("not an expr, but: $inst::$(typeof(inst))")
+        return visited, ArrayIR(Expr(:invalid), Expr(:invalid)), inputs
     end
 end
 
-function extract_array_ir(ir::IRCode)
-    inst_stream = ir.stmts
+# delete all the instructions that are parted of the expression that gets replaced, up until the points of input
+# goes up the use chain to replace all the instructions with nops
+function _delete_expr_ir!(ir::IRCode, loc::SSAValue, inputs::Set{InputTypes})
+    inst = ir.stmts[loc.id][:inst]
+    start = if inst.head == :call 2 else 3 end
 
-    # keep track of seen array values (used in some chain)
+    for arg in inst.args[start:end]
+        # if arg is GlobalRef, we can assume it is already ∈ inputs
+        if arg isa SSAValue && arg ∉ inputs
+            _delete_expr_ir!(ir, arg, inputs)
+        end
+    end
+
+    # TODO: check if this is a sensible way to nop instructions?
+    # TODO: decrease number of uses, remove if uses == 0 ~ DCE pass
+    ir.stmts.inst[loc.id] = nothing
+end
+
+function OC(ir::IRCode, arg1::Any)
+    src = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
+    src.slotflags = UInt8[]
+    src.slotnames = Symbol[]
+    nargs = length(ir.argtypes)
+    Core.Compiler.replace_code_newstyle!(src, ir, nargs)
+    Core.Compiler.widen_all_consts!(src)
+    src.inferred = true
+
+    m = ccall(:jl_make_opaque_closure_method, Ref{Method}, (Any, Any, Any, Any, Any),
+              @__MODULE__, nothing, nargs, Core.LineNumberNode(0, nothing), src)
+
+    rarg1 = Ref{Any}(arg1)
+    ccall(:jl_new_opaque_closure, Any, (Any, Any, Any, Any, Any, Any, Csize_t),
+          Tuple{ir.argtypes[2:end]...}, false, Union{}, Any, m, rarg1, 1)::Core.OpaqueClosure
+end
+
+function extract_array_ir(ir::IRCode)
+    stmts = ir.stmts
+
+    # set  of already visited array SSA values (as end results)
     visited = Set()
     exprs = ArrayIR[]
 
+    println(ir.argtypes)
+
+    oc = OC(ir, nothing)
+    oc()
+
+    println(ir)
+
     # start backwards
-    for idx in length(inst_stream.inst):-1:1
-        stmt = inst_stream.inst[idx]
+    for idx in length(stmts):-1:1
+        stmt = stmts[idx][:inst]
+        loc = SSAValue(idx)
 
         stmt isa Expr || continue
         stmt.head == :invoke || stmt.head == :call || continue
         # check if return type is StubArray and use this to confirm array ir
-        rettype = CC.widenconst(ir.stmts.type[idx])
+        rettype = CC.widenconst(stmts[idx][:type])
         rettype <: AbstractGPUArray || continue
 
         print("$(idx) = ");
-        visited, arir = _extract_ir(ir, SSAValue(idx), visited=visited)
+        visited, arir, inputs = _extract_ir(ir, loc, visited=visited)
+
         println(arir.op_expr)
         println("of type:")
         println(arir.type_expr)
 
 
+        println(">>>")
+        println("$inputs")
+
         op = simplify(arir)
         println("simplified = $op")
         println("---")
+
+        println("deleting ops from cfg")
+        _delete_expr_ir!(ir, loc, inputs)
+        println(ir)
+        println("---")
+
+        println("insert optimized instructions as opaque closuer")
 
         argtypes = Type[]
         argidx = SSAValue[]

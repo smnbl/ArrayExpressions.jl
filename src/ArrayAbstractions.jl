@@ -2,7 +2,6 @@ module ArrayAbstractions
 
 export ArrayIR
 
-include("array.jl")
 include("ir.jl")
 
 include("term_interface.jl")

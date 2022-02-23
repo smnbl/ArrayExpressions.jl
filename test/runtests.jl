@@ -1,25 +1,30 @@
 using ArrayAbstractions
 using Metatheory
-using CUDA
+using GPUArrays
 
 const AA = ArrayAbstractions
+
+# implementation of AbstractGPUArray on CPU
+include("jlarray.jl")
+using .JLArrays
 
 #ArrayAbstractions.inject_typeinf()
 
 @info "testing GEMM optim"
-(M, N, K) = (10, 20, 30)
+const (M, N, K) = (10, 20, 30)
 
 @array_opt function f_opt()
-    A = CuArray(rand(Float32, (M, K)))
-    B = CuArray(rand(Float32, (K, N)))
-    C = CuArray(rand(Float32, (M, N)))
+    A = JLArray(rand(Float32,(M, K)))
+    B = JLArray(rand(Float32,(K, N)))
+    C = JLArray(rand(Float32,(M, N)))
+    repeat = x
+
     T = A * B
-    D = T + C
-    return D
+    if (rand() > 0.5)
+        C = x*C
+    end
+
+    return T + C
 end
 
-using InteractiveUtils
-
-println(InteractiveUtils.@code_typed f_opt())
-
-AA.codegen(:typed, f_opt, (), Core.svec())
+AA.codegen(:inject, f_opt, (), Core.svec())

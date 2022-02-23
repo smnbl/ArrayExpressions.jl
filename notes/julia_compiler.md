@@ -88,4 +88,6 @@ Tfunc seems short for **transfer function**, they define the type transfer funct
 - invoke: static dispatch, preselected on MethodInstance
 - call: still has to specialize the function to a MethodInstance
 
+## _extype
+My current theory is that extype stands for 'extended type' aka it stands for an extended lattice element, (which contains extra annotations, added to the Julia base type like Const(..)), it can be converted to a native Julia type using `widenconst`
 

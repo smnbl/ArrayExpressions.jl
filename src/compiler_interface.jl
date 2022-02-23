@@ -94,10 +94,9 @@ end
 
 ## LLVM IR Generation
 
-## PUTTING IT ALL TOGETHER
 ## TODO: idea to trap inference -> reset typeinf_func using jl_set_typeinf_func
+## HACK: you're not supposed to to it this way i guess :P
 typeinf(mi::MethodInstance, world::UInt) = CC.typeinf_ext_toplevel(ArrayInterpreter(world), mi)
-
 function inject_typeinf()
     ccall(:jl_set_typeinf_func, Cvoid, (Any,), typeinf)
 end
@@ -109,14 +108,18 @@ function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
     output == :julia && return Base.uncompressed_ir(mi.def)
 
     @info "Performing Inference"
-    interp = ArrayInterpreter()
-    src = CC.typeinf_ext(interp, mi)
 
-    # get code instance & link inferred src
-    ci = CC.getindex(CC.code_cache(interp), mi)
-    ci.inferred = src
+    # perform inference & optimizations using ArrayInterpreter
+    interp = ArrayInterpreter()
+    src::CodeInfo = CC.typeinf_ext(interp, mi)
 
     output == :typed && return src
+
+    # get code instance & replace inferred src with 
+    # TODO: this seems wrong?; might seem to work because compilation is only done after calling the CodeInstance object?
+    # TODO: replace this by an opaque closuer performing the operations / a GPU kernel performing the operations
+    code::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
+    code.inferred = src
 
     # TODO:
     # 1. populate cache with code
