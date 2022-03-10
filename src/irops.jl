@@ -1,7 +1,7 @@
 # extract expression that resolves to #indx SSA value
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 # visited: set of already visited notes
-function _extract_ir(ir::IRCode, loc::SSAValue; visited=Set())
+function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
     inst = ir.stmts[loc.id][:inst]
     type = ir.stmts[loc.id][:type]
 
@@ -23,7 +23,7 @@ function _extract_ir(ir::IRCode, loc::SSAValue; visited=Set())
             else
                 # TODO: stop at functions with side effects?
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
-                visited, arir, extra_inputs = _extract_ir(ir, arg, visited=visited)
+                visited, arir, extra_inputs = _extract_slice(ir, arg, visited=visited)
                 push!(args_op, arir.op_expr)
                 push!(args_type, arir.type_expr)
                 union!(inputs, extra_inputs)
@@ -59,9 +59,10 @@ function _delete_expr_ir!(ir::IRCode, loc::SSAValue, inputs::Set{InputTypes})
 
     # TODO: check if this is a sensible way to nop instructions?
     # TODO: decrease number of uses, remove if uses == 0 ~ DCE pass
-    ir.stmts.inst[loc.id] = nothing
+    # ir.stmts.inst[loc.id] = nothing
 end
 
+# opaque closuers are supported from Julia v1.8 onwards
 function OC(ir::IRCode, arg1::Any)
     src = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
     src.slotflags = UInt8[]
@@ -79,7 +80,7 @@ function OC(ir::IRCode, arg1::Any)
           Tuple{ir.argtypes[2:end]...}, false, Union{}, Any, m, rarg1, 1)::Core.OpaqueClosure
 end
 
-function extract_array_ir(ir::IRCode)
+function extract_slice(ir::IRCode)
     stmts = ir.stmts
 
     # set  of already visited array SSA values (as end results)
@@ -88,10 +89,7 @@ function extract_array_ir(ir::IRCode)
 
     println(ir.argtypes)
 
-    oc = OC(ir, nothing)
-    oc()
-
-    println(ir)
+    #println(ir)
 
     # start backwards
     for idx in length(stmts):-1:1
@@ -105,7 +103,7 @@ function extract_array_ir(ir::IRCode)
         rettype <: AbstractGPUArray || continue
 
         print("$(idx) = ");
-        visited, arir, inputs = _extract_ir(ir, loc, visited=visited)
+        visited, arir, inputs = _extract_slice(ir, loc, visited=visited)
 
         println(arir.op_expr)
         println("of type:")
@@ -119,12 +117,21 @@ function extract_array_ir(ir::IRCode)
         println("simplified = $op")
         println("---")
 
-        println("deleting ops from cfg")
-        _delete_expr_ir!(ir, loc, inputs)
-        println(ir)
-        println("---")
 
-        println("insert optimized instructions as opaque closuer")
+        # Note: not necessary to delete anything, we should be able to rely on the DCE pass (part of the compact! routine)
+        # but it seems that the lack of a proper escape analysis? makes DCE unable to delete unused array expressions so we implement our own routine?
+
+        println("insert optimized instructions")
+        # TODO: make this runnable; eg replace with an OC or similar
+        stmts.inst[idx] = Expr(:call, :get_jl_array)
+
+        # TODO: compact & verify IR :)
+        println("compacting ir")
+        ir = CC.compact!(ir, true)
+        println(ir)
+
+        # this throws if sth is wrong with the ir
+        CC.verify_ir(ir)
 
         argtypes = Type[]
         argidx = SSAValue[]

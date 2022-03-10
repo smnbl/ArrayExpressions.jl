@@ -86,7 +86,7 @@ function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params
 
     if (perform_array_opt)
         println("array_opt")
-        extract_array_ir(ir)
+        extract_slice(ir)
     end
 
     CC.finish(interp, opt, params, ir, result)
