@@ -10,22 +10,19 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
 
     if CC.isexpr(inst, :call) || CC.isexpr(inst, :invoke)
         args_op = []
-        args_type = []
         start = if inst.head == :call 2 else 3 end
 
         for arg in inst.args[start:end]
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             type = CC.widenconst(CC.argextype(arg, ir, ir.sptypes, ir.argtypes))
             if !(type <: AbstractGPUArray)
-                push!(args_op, Expr(:input, arg))
-                push!(args_type, Expr(:input, type))
+                push!(args_op, ArrayExpr(:input, [arg], type))
                 push!(inputs, arg)
             else
                 # TODO: stop at functions with side effects?
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
                 visited, arir, extra_inputs = _extract_slice(ir, arg, visited=visited)
                 push!(args_op, arir.op_expr)
-                push!(args_type, arir.type_expr)
                 union!(inputs, extra_inputs)
             end
         end
@@ -33,14 +30,16 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
         # widenconst: converst Const(Type) -> Type ?
         # TODO: GlobalRefs have to be resolved (to Functions?)
         func = if inst.head == :call inst.args[1] else inst.args[2] end
-        return visited, ArrayIR(Expr(:call, resolve(func), args_op...), Expr(:call, Symbol(CC.widenconst(type)), args_type...)), inputs
+        return visited, ArrayIR(ArrayExpr(:call, [resolve(func), args_op...], CC.widenconst(type))), inputs
     elseif inst isa CC.PhiNode || inst isa CC.GlobalRef
         push!(inputs, loc)
         type = CC.widenconst(CC.argextype(inst, ir, ir.sptypes, ir.argtypes))
-        return visited, ArrayIR(Expr(:input, inst), Expr(:input, type)), inputs
+        return visited, ArrayIR(ArrayExpr(:input, [inst], type)), inputs
+    elseif inst isa CC.SlotNumber
+
     else
         println("not an expr, but: $inst::$(typeof(inst))")
-        return visited, ArrayIR(Expr(:invalid), Expr(:invalid)), inputs
+        return visited, ArrayIR(ArrayExpr(:invalid, [], Union{})), inputs
     end
 end
 
@@ -87,9 +86,7 @@ function extract_slice(ir::IRCode)
     visited = Set()
     exprs = ArrayIR[]
 
-    println(ir.argtypes)
-
-    #println(ir)
+    println(ir)
 
     # start backwards
     for idx in length(stmts):-1:1
@@ -106,17 +103,15 @@ function extract_slice(ir::IRCode)
         visited, arir, inputs = _extract_slice(ir, loc, visited=visited)
 
         println(arir.op_expr)
-        println("of type:")
-        println(arir.type_expr)
-
 
         println(">>>")
         println("$inputs")
 
-        op = simplify(arir)
+        op = simplify(arir.op_expr)
         println("simplified = $op")
         println("---")
 
+        #=
 
         # Note: not necessary to delete anything, we should be able to rely on the DCE pass (part of the compact! routine)
         # but it seems that the lack of a proper escape analysis? makes DCE unable to delete unused array expressions so we implement our own routine?
@@ -135,6 +130,7 @@ function extract_slice(ir::IRCode)
 
         argtypes = Type[]
         argidx = SSAValue[]
+    -   =#
     end
 
     println(visited)

@@ -31,7 +31,6 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
             world::UInt = CC.get_world_counter();
             inf_params = CC.InferenceParams(),
             opt_params = CC.OptimizationParams(
-
                             inlining = false,
                                               ),
         )
@@ -47,11 +46,18 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
     end
 end
 
-# Quickly and easily satisfy the AbstractInterpreter API contract
+
 CC.InferenceParams(ai::ArrayInterpreter) = ai.inf_params
+# Quickly and easily satisfy the AbstractInterpreter API contract
 CC.OptimizationParams(ai::ArrayInterpreter) = ai.opt_params
 CC.get_world_counter(ai::ArrayInterpreter) = ai.world
 CC.get_inference_cache(ai::ArrayInterpreter) = ai.cache
+
+# never inline, even if decorated
+function CC.inlining_policy(interp::ArrayInterpreter, @nospecialize(src), stmt_flag::UInt8, mi::MethodInstance, argtypes::Vector{Any})
+    println("inlining called")
+    return nothing
+end
 
 # re-use the global cache, but limit the view using WorldView
 # WorldView limits range of valid cache contents to cache entries that have world_age == world_counter
@@ -79,8 +85,16 @@ end
 function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, @nospecialize(result))
     nargs = Int(opt.nargs) - 1
 
+    ci = opt.src
+    sv = opt
+    nargs = Int(opt.nargs) - 1
+    preserve_coverage = CC.coverage_enabled(sv.mod)
+
+    # run some passes, but not the inlining pass
     # TODO: interface changed in 1.8
-    ir = CC.run_passes(opt.src, nargs, opt)
+    ir = CC.convert_to_ircode(ci, CC.copy_exprargs(ci.code), preserve_coverage, nargs, sv)
+    ir = CC.slot2reg(ir, ci, nargs, sv)
+    ir = CC.compact!(ir)
 
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
 
@@ -92,34 +106,31 @@ function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params
     CC.finish(interp, opt, params, ir, result)
 end
 
-## LLVM IR Generation
-
-## TODO: idea to trap inference -> reset typeinf_func using jl_set_typeinf_func
-## HACK: you're not supposed to to it this way i guess :P
-typeinf(mi::MethodInstance, world::UInt) = CC.typeinf_ext_toplevel(ArrayInterpreter(world), mi)
-function inject_typeinf()
-    ccall(:jl_set_typeinf_func, Cvoid, (Any,), typeinf)
-end
-
 function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
-    @info "Emitting Julia"
-    mi = emit_julia(f, atype, sparams)
-
-    output == :julia && return Base.uncompressed_ir(mi.def)
+    # @info "Emitting Julia"
+    # output == :julia && return Base.uncompressed_ir(mi.def)
 
     @info "Performing Inference"
 
     # perform inference & optimizations using ArrayInterpreter
     interp = ArrayInterpreter()
-    src::CodeInfo = CC.typeinf_ext(interp, mi)
+
+    sig = CC.signature_type(f, atype)
+    match::CC.MethodMatch = Base._which(sig)
+
+    # perform inference & optimizations using ArrayInterpreter
+    interp = ArrayInterpreter()
+    
+    (src::CodeInfo, ty) = Core.Compiler.typeinf_code(interp, match.method, match.spec_types, match.sparams, true)
+    println(src)
 
     output == :typed && return src
 
     # get code instance & replace inferred src with 
     # TODO: this seems wrong?; might seem to work because compilation is only done after calling the CodeInstance object?
     # TODO: replace this by an opaque closuer performing the operations / a GPU kernel performing the operations
-    code::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
-    code.inferred = src
+    # code::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
+    # code.inferred = src
 
     # TODO:
     # 1. populate cache with code

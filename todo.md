@@ -1,6 +1,7 @@
 # How to implement ArrayAbstractions in Julia
 ## Metatheory interface upgrades
-- add support for extra dynamic constraints
+- add suport for type checks using type annotations to make them more intuitive (might require modifications to Metatheory.jl)
+- look at the concat -> matmul -> split pattern (seems to be applied a lot in research as a fruitful optimization)
 
 ## imperative -> functional control flow (see XLA.jl paper section 5.2)
         - replace phi nodes make up conditions for functional control flow
