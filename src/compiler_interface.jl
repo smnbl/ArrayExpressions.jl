@@ -53,12 +53,6 @@ CC.OptimizationParams(ai::ArrayInterpreter) = ai.opt_params
 CC.get_world_counter(ai::ArrayInterpreter) = ai.world
 CC.get_inference_cache(ai::ArrayInterpreter) = ai.cache
 
-# never inline, even if decorated
-function CC.inlining_policy(interp::ArrayInterpreter, @nospecialize(src), stmt_flag::UInt8, mi::MethodInstance, argtypes::Vector{Any})
-    println("inlining called")
-    return nothing
-end
-
 # re-use the global cache, but limit the view using WorldView
 # WorldView limits range of valid cache contents to cache entries that have world_age == world_counter
 # TODO: built own cache to not infere with NativeInterpreter's global code_cache
@@ -82,57 +76,53 @@ macro array_opt(ex)
     esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
 end
 
-function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, @nospecialize(result))
-    nargs = Int(opt.nargs) - 1
-
+function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, caller::CC.InferenceResult)
     ci = opt.src
     sv = opt
-    nargs = Int(opt.nargs) - 1
-    preserve_coverage = CC.coverage_enabled(sv.mod)
 
     # run some passes, but not the inlining pass
-    # TODO: interface changed in 1.8
-    ir = CC.convert_to_ircode(ci, CC.copy_exprargs(ci.code), preserve_coverage, nargs, sv)
-    ir = CC.slot2reg(ir, ci, nargs, sv)
+    ir = CC.convert_to_ircode(ci, sv)
+    ir = CC.slot2reg(ir, ci, sv)
     ir = CC.compact!(ir)
 
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
 
     if (perform_array_opt)
+        # canonicalize to SSA IR
+        # TODO: interface changed in 1.8
         println("array_opt")
-        extract_slice(ir)
+        ir = extract_slice(ir)
     end
 
-    CC.finish(interp, opt, params, ir, result)
+    # TODO: interface changed in 1.8
+    ir = CC.compact!(ir)
+
+    # verify ir
+    CC.verify_ir(ir)
+
+    CC.finish(interp, opt, params, ir, caller)
 end
 
 function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
-    # @info "Emitting Julia"
-    # output == :julia && return Base.uncompressed_ir(mi.def)
+    @info "Emitting Julia"
+    mi = emit_julia(f, atype, sparams)
+    output == :julia && return Base.uncompressed_ir(mi.def)
 
     @info "Performing Inference"
-
     # perform inference & optimizations using ArrayInterpreter
     interp = ArrayInterpreter()
-
-    sig = CC.signature_type(f, atype)
-    match::CC.MethodMatch = Base._which(sig)
 
     # perform inference & optimizations using ArrayInterpreter
     interp = ArrayInterpreter()
     
-    (src::CodeInfo, ty) = Core.Compiler.typeinf_code(interp, match.method, match.spec_types, match.sparams, true)
-    println(src)
+    ci::CodeInfo = CC.typeinf_ext(interp, mi)
+    println(ci)
 
-    output == :typed && return src
+    output == :typed && return ci
 
-    # get code instance & replace inferred src with 
+    # get code instance & replace inferred src with (populate the cache)
     # TODO: this seems wrong?; might seem to work because compilation is only done after calling the CodeInstance object?
     # TODO: replace this by an opaque closuer performing the operations / a GPU kernel performing the operations
-    # code::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
-    # code.inferred = src
-
-    # TODO:
-    # 1. populate cache with code
-    # 2. generate native IR
+    code_instance::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
+    code_instance.inferred = ci
 end

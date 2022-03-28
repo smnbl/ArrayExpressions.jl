@@ -1,7 +1,15 @@
 # How to implement ArrayAbstractions in Julia
 ## Metatheory interface upgrades
 - add suport for type checks using type annotations to make them more intuitive (might require modifications to Metatheory.jl)
+    -> look at ways to make Metatheory work with `symtype` from TermInterface to improve type decorations of rewrite rules
+
 - look at the concat -> matmul -> split pattern (seems to be applied a lot in research as a fruitful optimization)
+- look for a better way to fix matching non-top level function names (like Base.Broadcast.materialize); problem with classical matcher (-> report bug?) ?
+
+- make lambda expressions work with Metatheory (does Metatheory not recurse in block arguments?; be careful with bounded variables)
+- make replacement of operations possible? (requires changes to extraction mechanism) -> TODO: open up an issue about this
+
+- make cost function that optimizes for replacements
 
 ## imperative -> functional control flow (see XLA.jl paper section 5.2)
         - replace phi nodes make up conditions for functional control flow

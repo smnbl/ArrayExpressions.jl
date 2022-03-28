@@ -9,8 +9,12 @@ include("irutils.jl")
 # interface with Core.Compiler
 include("compiler_interface.jl")
 
+# Codegen
+include("codegen.jl")
+
 # Equality saturation rules & simplification
 include("rules.jl")
 include("irops.jl")
+
 
 end # module

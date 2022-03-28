@@ -1,12 +1,20 @@
 using Symbolics
 using Metatheory
-using Metatheory.EGraphs
+using Metatheory: Postwalk, Fixpoint, EGraphs, Chain
 
 using Core.Compiler
 const C = Core
 const CC = C.Compiler
 
+using TermInterface
+
 ArrayGemm(A, B, C) = error("should still be linked with GemmKernels.jl")
+
+# canonicalize broadcasts using classic term rewriting
+const canonicalize_broadcasting = @theory A B op begin
+    materialize(A) --> A
+    broadcasted(op, A, B) --> broadcast(op, A, B)
+end
 
 # some mathematical properties of matrices
 #
@@ -42,7 +50,7 @@ const multiplication_properties = @theory A B C d begin
 end
 
 const adjoint_properties = @theory A B begin
-    adjoint(adjoint(~A)) == A
+    adjoint(adjoint(A)) == A
 end
 
 function possibleGemm(A::EClass, B::EClass, C::EClass)
@@ -76,19 +84,31 @@ end
 =#
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    return Expr(:call, :Gemm, A, B, C)
+    return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
 end
 
-function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, op::EClass, d::EClass)
-    return Expr(:call, :GemmWithEpilogue, A, B, C, op, d)
+# Epilogues
+## Elementwise
+## Bias
+function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
+    return ArrayExpr(:call, [:GemmWithEpilogue, A, B, C, epilogue], Union{})
+end
+
+function Lambda(binding::Symbol, body)
+    return ArrayExpr(:->, [binding, body], Union{})
+end
+
+function App(func, arguments)
+    return ArrayExpr(:app, [func, arguments...], Union{})
 end
 
 function istype(X::EClass, type)
     return getdata(X, MetadataAnalysis, Union{}) <: type
 end
 
+
 # big rewrite rules with custom implementations
-const gemm_properties = @theory A B C op d begin
+const gemm_properties = @theory A B C op d epi begin
     # GEMM;
     # TODO: make sure A, B, C is a matrix, and not a scalar!!
     # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
@@ -99,12 +119,15 @@ const gemm_properties = @theory A B C op d begin
     # merge operations in prologue / epilogue
     # TODO: how to merge with prefix? prologue?
     # TODO: make sure epilogue is scalar
-    broadcasted(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, op, d)  where istype(d, Number)
+    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d])))  where istype(d, Number)
+
+    # fuse operations
+    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
 
     # TODO: add gemm alpha rule
 end
 
-# TODO: add map(reduce()) -> mapreduce() rule & other map/reduce rules
+# TODO: add map(reduce()) -> mapreduce() rule & other map/reduce ruleshttps://discord.com/channels/442048551342702605/570980600132009987
 
 # Define Metatheory rules
 const theory = addition_properties ∪ multiplication_properties ∪ addition_properties ∪ gemm_properties
@@ -195,10 +218,38 @@ function EGraphs.join(an::Type{MetadataAnalysis}, a, b)
     end
 end
 
+function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
+    if operation(n) == :GemmWithEpilogue
+        cost = 1
+    elseif operation(n) == :Gemm
+        cost = 10
+    elseif !(exprhead(n) == :call || exprhead(n) == :invoke) || operation(n) == :app || operation(n) == :Lambda
+        cost = 0
+    else
+        cost = 100
+    end
+
+    for id in arguments(n)
+        eclass = g[id]
+        # if the child e-class has not yet been analyzed, return +Inf
+        !hasdata(eclass, an) && (cost += Inf; break)
+        cost += last(getdata(eclass, an))
+    end
+
+    return cost
+end
+
+cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 0
+
 # TODO: should we lower dot & plus to map / reduce combos?
 # NOTE: as long as tensor_expr satisfies TermInterface, this will work
 function simplify(tensor_expr)
+    # canonicalize broadcasts (classical rewriting)
+    tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
+
+    # Equality Saturation
     g = EGraph(tensor_expr; keepmeta = true)
+
     settermtype!(g, ArrayExpr)
 
     # saturate graph
@@ -207,10 +258,11 @@ function simplify(tensor_expr)
     # analyze!(g, ArrayAnalysis)
 
     # saturate again with the extra analysis info
-    report = saturate!(g, theory)
+    # report = saturate!(g, theory)
 
     # TODO: replace with own cost function
     # astsize: cost function that favors smaller expressions in the equivalence classes
-    ex = extract!(g, astsize)
+    ex = extract!(g, cost_function)
+
     return ex
 end

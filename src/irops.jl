@@ -1,3 +1,6 @@
+# types of values that are considered intermediate
+const ValueTypes = Union{AbstractGPUArray, Base.Broadcast.Broadcasted}
+
 # extract expression that resolves to #indx SSA value
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 # visited: set of already visited notes
@@ -15,7 +18,7 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
         for arg in inst.args[start:end]
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             type = CC.widenconst(CC.argextype(arg, ir, ir.sptypes, ir.argtypes))
-            if !(type <: AbstractGPUArray)
+            if !(type <: ValueTypes)
                 push!(args_op, ArrayExpr(:input, [arg], type))
                 push!(inputs, arg)
             else
@@ -61,24 +64,6 @@ function _delete_expr_ir!(ir::IRCode, loc::SSAValue, inputs::Set{InputTypes})
     # ir.stmts.inst[loc.id] = nothing
 end
 
-# opaque closuers are supported from Julia v1.8 onwards
-function OC(ir::IRCode, arg1::Any)
-    src = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
-    src.slotflags = UInt8[]
-    src.slotnames = Symbol[]
-    nargs = length(ir.argtypes)
-    Core.Compiler.replace_code_newstyle!(src, ir, nargs)
-    Core.Compiler.widen_all_consts!(src)
-    src.inferred = true
-
-    m = ccall(:jl_make_opaque_closure_method, Ref{Method}, (Any, Any, Any, Any, Any),
-              @__MODULE__, nothing, nargs, Core.LineNumberNode(0, nothing), src)
-
-    rarg1 = Ref{Any}(arg1)
-    ccall(:jl_new_opaque_closure, Any, (Any, Any, Any, Any, Any, Any, Csize_t),
-          Tuple{ir.argtypes[2:end]...}, false, Union{}, Any, m, rarg1, 1)::Core.OpaqueClosure
-end
-
 function extract_slice(ir::IRCode)
     stmts = ir.stmts
 
@@ -97,7 +82,8 @@ function extract_slice(ir::IRCode)
         stmt.head == :invoke || stmt.head == :call || continue
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(stmts[idx][:type])
-        rettype <: AbstractGPUArray || continue
+
+        rettype <: ValueTypes || continue
 
         print("$(idx) = ");
         visited, arir, inputs = _extract_slice(ir, loc, visited=visited)
@@ -111,28 +97,20 @@ function extract_slice(ir::IRCode)
         println("simplified = $op")
         println("---")
 
-        #=
+        println(op)
+
+        println("codegen:")
+        expr = codegen(op)
 
         # Note: not necessary to delete anything, we should be able to rely on the DCE pass (part of the compact! routine)
         # but it seems that the lack of a proper escape analysis? makes DCE unable to delete unused array expressions so we implement our own routine?
+        _delete_expr_ir!(ir, loc, inputs)
 
         println("insert optimized instructions")
         # TODO: make this runnable; eg replace with an OC or similar
-        stmts.inst[idx] = Expr(:call, :get_jl_array)
+        stmts.inst[idx] = expr
 
-        # TODO: compact & verify IR :)
-        println("compacting ir")
-        ir = CC.compact!(ir, true)
-        println(ir)
-
-        # this throws if sth is wrong with the ir
-        CC.verify_ir(ir)
-
-        argtypes = Type[]
-        argidx = SSAValue[]
-    -   =#
+        return ir
     end
-
-    println(visited)
 end
 
