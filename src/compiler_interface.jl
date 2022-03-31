@@ -72,38 +72,22 @@ function CC.add_remark!(ai::ArrayInterpreter, sv::CC.InferenceState, msg)
     @debug "Inference remark during array compilation of $(sv.linfo): $msg"
 end
 
-macro array_opt(ex)
-    esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
-end
-
-function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, caller::CC.InferenceResult)
+function CC.optimize(interp::ArrayInterpreter, opt::CC.OptimizationState, params::CC.OptimizationParams, @nospecialize(result))
+    # TODO: support v1.8 interface
     ci = opt.src
     sv = opt
+    nargs = Int(opt.nargs) - 1
+    preserve_coverage = CC.coverage_enabled(sv.mod)
 
     # run some passes, but not the inlining pass
-    ir = CC.convert_to_ircode(ci, sv)
-    ir = CC.slot2reg(ir, ci, sv)
+    ir = CC.convert_to_ircode(ci, CC.copy_exprargs(ci.code), preserve_coverage, nargs, sv)
+    ir = CC.slot2reg(ir, ci, nargs, sv)
     ir = CC.compact!(ir)
 
-    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
-
-    if (perform_array_opt)
-        # canonicalize to SSA IR
-        # TODO: interface changed in 1.8
-        println("array_opt")
-        ir = extract_slice(ir)
-    end
-
-    # TODO: interface changed in 1.8
-    ir = CC.compact!(ir)
-
-    # verify ir
-    CC.verify_ir(ir)
-
-    CC.finish(interp, opt, params, ir, caller)
+    CC.finish(interp, opt, params, ir, result)
 end
 
-function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
+function optimize(output::Symbol, f, atype, sparams::C.SimpleVector)
     @info "Emitting Julia"
     mi = emit_julia(f, atype, sparams)
     output == :julia && return Base.uncompressed_ir(mi.def)
@@ -112,17 +96,24 @@ function codegen(output::Symbol, f, atype, sparams::C.SimpleVector)
     # perform inference & optimizations using ArrayInterpreter
     interp = ArrayInterpreter()
 
-    # perform inference & optimizations using ArrayInterpreter
-    interp = ArrayInterpreter()
-    
-    ci::CodeInfo = CC.typeinf_ext(interp, mi)
-    println(ci)
+    optimize=true
+    sig = CC.signature_type(f, atype)
+    match::CC.MethodMatch = Base._which(sig)
+    (ci::CodeInfo, ty) = Core.Compiler.typeinf_code(interp, match.method, match.spec_types, match.sparams, optimize)
 
-    output == :typed && return ci
+    # TODO: add tests for this
+    if !(ty <: AbstractGPUArray)
+        throw("Function does not return <: AbstractGPUArray")
+    end
 
-    # get code instance & replace inferred src with (populate the cache)
-    # TODO: this seems wrong?; might seem to work because compilation is only done after calling the CodeInstance object?
-    # TODO: replace this by an opaque closuer performing the operations / a GPU kernel performing the operations
-    code_instance::CC.CodeInstance = CC.getindex(CC.code_cache(interp), mi)
-    code_instance.inferred = ci
+    ir = CC.inflate_ir(ci)
+
+    println(ir)
+
+    # extract & optimize array expression
+    expr = extract_slice(ir)
+    println(expr)
+
+    # evaluate expession
+    return expr
 end

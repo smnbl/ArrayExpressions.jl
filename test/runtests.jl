@@ -17,50 +17,79 @@ using .JLArrays
 @info "testing GEMM optim"
 const (M, N, K) = (10, 20, 30)
 
-# temporary hack
-function get_jl_array()
-    println("replacement called!")
-    C = JLArray(rand(Float32,(M, N)))
-    return C
-end
-
 function Gemm(A, B, C)
     println("gemming...")
+    return A*B + C
 end
 
-@array_opt function f_opt()
-    A = JLArray(rand(Float32,(M, K)))
-    B = JLArray(rand(Float32,(K, N)))
-    C = JLArray(rand(Float32,(M, N)))
+A = JLArray(rand(Float32,(M, K)))
+B = JLArray(rand(Float32,(K, N)))
+C = JLArray(rand(Float32,(M, N)))
 
+function gemm_replacement(A::JLArray, B::JLArray, C::JLArray)
     return C + A * B
 end
 
-# opaque closuers are supported from Julia v1.8 onwards
-function OC(ir::CC.IRCode, arg1::Any)
-    src = ccall(:jl_new_code_info_uninit, Ref{CodeInfo}, ())
-    src.slotflags = UInt8[]
-    src.slotnames = Symbol[]
-    nargs = length(ir.argtypes)
-    CC.replace_code_newstyle!(src, ir, nargs)
-    CC.widen_all_consts!(src)
-    src.inferred = true
-
-    m = ccall(:jl_make_opaque_closure_method, Ref{Method}, (Any, Any, Any, Any, Any),
-              @__MODULE__, nothing, nargs, Core.LineNumberNode(0, nothing), src)
-
-    rarg1 = Ref{Any}(arg1)
-    ccall(:jl_new_opaque_closure, Any, (Any, Any, Any, Any, Any, Any, Csize_t),
-          Tuple{ir.argtypes[2:end]...}, false, Union{}, Any, m, rarg1, 1)::Core.OpaqueClosure
+function gemm_fusing_scalar_add(A::JLArray, B::JLArray, C::JLArray)
+    return A * B + C .+ 2
 end
 
+function gemm_fusing_scalar_mul(A::JLArray, B::JLArray, C::JLArray)
+    return (C + A * B) .* 2
+end
 
-ci = AA.codegen(:cache, f_opt, (), Core.svec())
+function gemm_fusing_scalar_addmul(A::JLArray, B::JLArray, C::JLArray)
+    return (C + A * B) .* 2 .+ 2
+end
 
-f_opt()
+function strength_reduction(A::JLArray, B::JLArray, C::JLArray)
+    return (C + C)
+end
 
-println(Base.code_typed(f_opt))
+function assignments(A, B, C)
+    X = A
+    Y = B
+    Z = C
 
-# TODO: put source in generated function (see tests for examples on how to do (use OpaqueClosure?)
+    return X * Y + C
+end
 
+function if_statement(A::JLArray, B::JLArray, C::JLArray)
+    # TODO
+    if x == 10
+        C = 2*C
+    end
 
+    return C
+end
+
+#=
+expr  = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+eval(:(lambda = $expr;
+        println(typeof(lambda));
+        println(lambda);
+        println(lambda(A, B, C))))
+=#
+
+# GEMM:
+expr  = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+expr  = AA.optimize(:cache, gemm_fusing_scalar_add, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+expr  = AA.optimize(:cache, gemm_fusing_scalar_mul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+expr  = AA.optimize(:cache, gemm_fusing_scalar_addmul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+# Matrix arithmetic
+expr  = AA.optimize(:cache, strength_reduction, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+# assignments
+expr  = AA.optimize(:cache, assignments, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+# if
+expr  = AA.optimize(:cache, if_statement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+#=
+eval(:(lambda = $expr;
+        println(typeof(lambda));
+        println(lambda);
+        println(lambda(A, B, C))))
+=#
