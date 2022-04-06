@@ -53,43 +53,10 @@ const adjoint_properties = @theory A B begin
     adjoint(adjoint(A)) == A
 end
 
-function possibleGemm(A::EClass, B::EClass, C::EClass)
-    a_info = getdata(A, ArrayAnalysis, nothing)
-    b_info = getdata(B, ArrayAnalysis, nothing)
-    c_info = getdata(C, ArrayAnalysis, nothing)
-
-    println("possible_gemm ($a_info, $b_info, $c_info)")
-
-    if a_info isa Symbol && b_info isa Symbol && c_info isa Symbol
-        if a_info == :nonscalar && b_info == :nonscalar && c_info == :nonscalar
-            throw("TODO: how to construct expression here??")
-        elseif a_info == :nonscalar && b_info == :nonscalar && c_info == :nonscalar
-            throw("TODO: possible gemm with epilogue mul")
-        end
-    end
-
-    return nothing
-end
-
-#=
-@Symbolics.wrapped function Gemm(A::AbstractMatrix, B::AbstractMatrix, C::AbstractMatrix)
-    @Symbolics.syms i::Int j::Int k::Int
-    return @Symbolics.arrayop Gemm(A, B, C) (i, j) A[i, k] * B[k, j] + C[i, j]
-end
-
-@Symbolics.wrapped function GemmWithEpilogue(A::AbstractMatrix, B::AbstractMatrix, C::AbstractMatrix, ep)
-    @Symbolics.syms i::Int j::Int k::Int
-    return @Symbolics.arrayop GemmWithEpilogue(A, B, C) (i, j) A[i, k] * B[k, j] + C[i, j] + ep
-end
-=#
-
 function Gemm(A::EClass, B::EClass, C::EClass)
     return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
 end
 
-# Epilogues
-## Elementwise
-## Bias
 function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
     return ArrayExpr(:call, [:GemmWithEpilogue, A, B, C, epilogue], Union{})
 end
