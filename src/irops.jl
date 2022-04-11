@@ -1,4 +1,5 @@
 const CC = Core.Compiler
+using Core.Compiler: iterate
 
 # types of values that are considered intermediate
 const ValueTypes = Union{AbstractGPUArray, Base.Broadcast.Broadcasted, CC.SSAValue, Matrix, Number}
@@ -10,14 +11,15 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
     inst = ir.stmts[loc.id][:inst]
     type = ir.stmts[loc.id][:type]
 
-    push!(visited, loc.id)
+    push!(visited, loc)
     inputs = Set{InputTypes}()
 
     if CC.isexpr(inst, :call) || CC.isexpr(inst, :invoke)
         args_op = []
         start = if inst.head == :call 2 else 3 end
+        args = inst.args[start:end]
 
-        for arg in inst.args[start:end]
+        for arg in args
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             type = CC.widenconst(CC.argextype(arg, ir, ir.sptypes, ir.argtypes))
 
@@ -28,19 +30,18 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
                 push!(args_op, arir.op_expr)
                 union!(inputs, extra_inputs)
             else
-                push!(args_op, ArrayExpr(:call, [:input, arg], type))
+                push!(args_op, resolve(arg))
                 push!(inputs, arg)
             end
         end
 
-        # widenconst: converst Const(Type) -> Type ?
-        # TODO: GlobalRefs have to be resolved (to Functions?)
         func = if inst.head == :call inst.args[1] else inst.args[2] end
-        return visited, ArrayIR(ArrayExpr(:call, [resolve(func), args_op...], CC.widenconst(type))), inputs
-    elseif inst isa CC.PhiNode || inst isa CC.GlobalRef
+        return visited, ArrayIR(ArrayExpr(:call, [resolve(func), args_op...], type)), inputs
+    # inference barrier, inputs are SSAValues
+    elseif inst isa CC.GlobalRef || inst isa CC.PhiNode
         push!(inputs, loc)
         type = CC.widenconst(CC.argextype(inst, ir, ir.sptypes, ir.argtypes))
-        return visited, ArrayIR(ArrayExpr(:call, [:input, inst], type)), inputs
+        return visited, loc, inputs
     elseif inst isa CC.SlotNumber
 
     else
@@ -49,6 +50,7 @@ function _extract_slice(ir::IRCode, loc::SSAValue; visited=Set())
     end
 end
 
+# NOTE: atm this is not used!
 # delete all the instructions that are parted of the expression that gets replaced, up until the points of input
 # goes up the use chain to replace all the instructions with nops
 function _delete_expr_ir!(ir::IRCode, loc::SSAValue, inputs::Set{InputTypes})
@@ -62,55 +64,32 @@ function _delete_expr_ir!(ir::IRCode, loc::SSAValue, inputs::Set{InputTypes})
         end
     end
 
-    # TODO: check if this is a sensible way to nop instructions?
+    # TODO: check if this is a sensible way to nop instructions, it seems so as simple_dce does this?
     # TODO: decrease number of uses, remove if uses == 0 ~ DCE pass
-    # ir.stmts.inst[loc.id] = nothing
+    ir.stmts.inst[loc.id] = nothing
+    # ir.stmts.type[loc.id] = Nothing
 end
 
-function extract_slice(ir::IRCode)
-    stmts = ir.stmts
+function extract_slice(ir::IRCode, loc::SSAValue)
+    _, arir, _ = _extract_slice(ir, loc, visited=Set())
+    return arir
+end
 
-    # set  of already visited array SSA values (as end results)
-    visited = Set()
-    exprs = ArrayIR[]
+function optimize_ir(ir::IRCode)
+    stmts = ir.stmts
 
     # start backwards
     for idx in length(stmts):-1:1
-        stmt = stmts[idx][:inst]
         loc = SSAValue(idx)
 
+        loc ∉ visited || continue
         stmt isa Expr || continue
-        stmt.head == :invoke || stmt.head == :call || continue
+
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(stmts[idx][:type])
-
         rettype <: ValueTypes || continue
 
-        print("$(idx) = ");
-        visited, arir, inputs = _extract_slice(ir, loc, visited=visited)
-
-        println(arir.op_expr)
-
-        println(">>>")
-
-        op = simplify(arir.op_expr)
-        println("simplified = $op")
-        println("---")
-
-        println(op)
-
-        println("codegen:")
-        expr = codegen(op, inputs)
-
-        # Note: not necessary to delete anything, we should be able to rely on the DCE pass (part of the compact! routine)
-        # but it seems that the lack of a proper escape analysis? makes DCE unable to delete unused array expressions so we implement our own routine?
-        _delete_expr_ir!(ir, loc, inputs)
-
-         println("insert optimized instructions")
-         #TODO: make this runnable; eg replace with an OC or similar
-         stmts.inst[idx] = expr
-
-         return expr
+        # TODO: optimize whole ir body iteratively
     end
 end
 

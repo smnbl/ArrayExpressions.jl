@@ -1,6 +1,7 @@
 #+title: How to implement ArrayAbstractions in Julia
 
 * Metatheory interface upgrades
+
 ** TODO add suport for type checks using type annotations to make them more intuitive (might require modifications to Metatheory.jl)
 look at ways to make Metatheory work with `symtype` from TermInterface to improve type decorations of rewrite rules
 
@@ -25,6 +26,7 @@ Problem with classical matcher (-> report bug?)?
 * imperative **> functional control flow (see XLA.jl paper section 5.2)
 ** replace phi nodes make up conditions for functional control flow
 (in XLA.jl): computations inbetween get **outlined** in seperate functions
+
 ** loop identification:
 *** strongly connected regions of control flow get outlined as the loop body
 *** put values that have uses outside the strongly strongly connected region as wel as loop caried phi's into the **iteration state**

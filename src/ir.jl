@@ -20,6 +20,18 @@ import Base.(==)
 
 convert(::Type{Expr}, expr::ArrayExpr) = Expr(expr.head, expr.args...)
 
+function Lambda(binding::Symbol, body)
+    return ArrayExpr(:->, [binding, body], Union{})
+end
+
+function App(func, arguments)
+    return ArrayExpr(:app, [func, arguments...], Union{})
+end
+
+function Phi(edges, values, type=Union{})
+    return ArrayExpr(:ϕ, [edges, values], type)
+end
+
 function Base.show(io::IO, e::ArrayExpr)
     start = 1
     if e.head == :call
@@ -31,6 +43,16 @@ function Base.show(io::IO, e::ArrayExpr)
     elseif e.head == :->
         print(io, "$(e.args[1]) -> ")
         start = 2
+    elseif e.head == :ϕ
+        print(io, "ϕ(")
+        # only print the values
+        for arg in e.args[2][1:end-1]
+            print(io, arg)
+            print(io, ", ")
+        end
+        print(io, e.args[2][end])
+        print(io, ")")
+        return
     else
         print(io, "($(e.head))(")
     end

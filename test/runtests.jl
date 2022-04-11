@@ -46,6 +46,10 @@ function strength_reduction(A::JLArray, B::JLArray, C::JLArray)
     return (C + C)
 end
 
+function multi_strength_reduction(A::JLArray, B::JLArray, C::JLArray)
+    return (C + C + C + C + C + C)
+end
+
 function assignments(A, B, C)
     X = A
     Y = B
@@ -57,10 +61,22 @@ end
 function if_statement(A::JLArray, B::JLArray, C::JLArray)
     # TODO
     if x == 10
-        C = 2*C
+        C = C + C
     end
 
-    return C
+    return A * B + C
+end
+
+function test_ssa_codegen(A, B, C)
+    if x == 10
+        C = C + C
+    end
+
+    D = A * B + C # GEMM
+
+    B = 2 * D
+
+    return B
 end
 
 #=
@@ -73,12 +89,16 @@ eval(:(lambda = $expr;
 =#
 
 # GEMM:
-expr  = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
-expr  = AA.optimize(:cache, gemm_fusing_scalar_add, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
-expr  = AA.optimize(:cache, gemm_fusing_scalar_mul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
-expr  = AA.optimize(:cache, gemm_fusing_scalar_addmul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+expr = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+println(expr)
+
+#expr  = AA.optimize(:cache, gemm_fusing_scalar_add, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+#expr  = AA.optimize(:cache, gemm_fusing_scalar_mul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+#expr  = AA.optimize(:cache, gemm_fusing_scalar_addmul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
 
 # Matrix arithmetic
+#=
 expr  = AA.optimize(:cache, strength_reduction, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
 
 # assignments
@@ -86,6 +106,10 @@ expr  = AA.optimize(:cache, assignments, (JLArray{Float32, 2}, JLArray{Float32, 
 
 # if
 expr  = AA.optimize(:cache, if_statement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+
+# SSA codegen
+# expr  = AA.optimize(:cache, test_ssa_codegen, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+=#
 
 #=
 eval(:(lambda = $expr;
