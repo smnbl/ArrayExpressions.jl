@@ -64,20 +64,9 @@ function Base.show(io::IO, e::ArrayExpr)
     if length(e.args) > 0
         Base.show(io, e.args[end])
     end
-    print(io, ")")
+    print(io, ")::$(e.type)")
 end
 
-# functional representation of the array expressions as a Tree-like object
-struct ArrayIR
-    # expresses the operation & inputs
-    op_expr::ArrayExpr
-
-    # location of all the input locations aka the point at which the inputs are fed to the expression
-    # this is used when replacing an expression by removing all the intermediate operations that get replaced by the optimised kernel
-    # these can be the location of phi nodes or GlobalRefs to the used array variables
-    input_locs::Set{InputTypes}
-    ArrayIR(op::ArrayExpr) = new(op, Set())
-end
 
 # Make ArrayExpr support TermInterface.jl
 # modified from the Expr implementation
@@ -88,10 +77,23 @@ TI.operation(e::ArrayExpr) = expr_operation(e, Val{exprhead(e)}())
 TI.arguments(e::ArrayExpr) = expr_arguments(e, Val{exprhead(e)}())
 
 # See https://docs.julialang.org/en/v1/devdocs/ast/
-# TODO: safe to make Symbols?
-expr_operation(e::ArrayExpr, ::Union{Val{:call}}) = Symbol(e.args[1])
+function expr_operation(e::ArrayExpr, ::Union{Val{:call}})
+    if (e.args[1] isa ArrayExpr && e.args[1].head == :call && e.args[1].args[1] == :input)
+        e.args[1].args[2]
+    else
+        e.args[1]
+    end
+end
+
+function expr_operation(e::ArrayExpr, ::Union{Val{:invoke}})
+    if (e.args[2] isa ArrayExpr && e.args[2].head == :call && e.args[2].args[1] == :input)
+        e.args[2].args[2]
+    else
+        e.args[2]
+    end
+end
+
 expr_arguments(e::ArrayExpr, ::Union{Val{:call}}) = e.args[2:end]
-expr_operation(e::ArrayExpr, ::Union{Val{:invoke}}) = Symbol(e.args[2])
 expr_arguments(e::ArrayExpr, ::Union{Val{:invoke}}) = e.args[3:end]
 
 expr_operation(e::ArrayExpr, ::Val{T}) where T = T
@@ -102,13 +104,15 @@ TI.metadata(e::ArrayExpr) = (type = e.type)
 
 # will be fixed in later release of Metatheory
 function TI.similarterm(x::ArrayExpr, head, args, symtype = nothing; metadata = nothing, exprhead = :call)
-    TI.similarterm(ArrayExpr, head, args, nothing; metadata = nothing, exprhead = :call)
+    TI.similarterm(ArrayExpr, head, args, symtype; metadata, exprhead = :call)
 end
 
 function TI.similarterm(x::Type{ArrayExpr}, head, args, symtype = nothing; metadata = nothing, exprhead = :call)
-    expr_similarterm(head, args, (metadata == nothing) ? Union{} : metadata, Val{exprhead}())
+    expr_similarterm(head, args, isnothing(metadata) ? Union{} : metadata, Val{exprhead}())
 end
 
 expr_similarterm(head, args, type, ::Val{:call}) = ArrayExpr(:call, [head, args...], type)
-expr_similarterm(head, args, type, ::Val{:invoke}) = ArrayExpr(:invoke, [head, args...], type)
+
+# TODO: we lose invokes -> might result in performance degradation
+expr_similarterm(head, args, type, ::Val{:invoke}) = ArrayExpr(:call, [head, args...], type)
 expr_similarterm(head, args, type, ::Val{eh}) where {eh} = ArrayExpr(eh, args, type)

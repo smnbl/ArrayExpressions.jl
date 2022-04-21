@@ -17,17 +17,12 @@ using .JLArrays
 @info "testing GEMM optim"
 const (M, N, K) = (10, 20, 30)
 
-function Gemm(A, B, C)
-    println("gemming...")
-    return A*B + C
-end
-
 A = JLArray(rand(Float32,(M, K)))
 B = JLArray(rand(Float32,(K, N)))
 C = JLArray(rand(Float32,(M, N)))
 
-function gemm_replacement(A::JLArray, B::JLArray, C::JLArray)
-    return C + A * B
+@array_opt function gemm_replacement(A::JLArray, B::JLArray, C::JLArray)
+    return A * B + C
 end
 
 function gemm_fusing_scalar_add(A::JLArray, B::JLArray, C::JLArray)
@@ -79,8 +74,19 @@ function test_ssa_codegen(A, B, C)
     return B
 end
 
+function test_optimize(func, atypes, sptypes)
+    cache = AA.CodeCache()
+    ci, type = code_typed(func, atypes, interp=AA.ArrayInterpreter(cache, optimize=true))[1]
+
+    ir = CC.inflate_ir(ci, Any[sptypes...], Any[typeof(func), atypes...])
+
+    ir = AA.arroptim_pass(ir)
+
+    println(ir)
+end
+  
+
 #=
-expr  = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
 
 eval(:(lambda = $expr;
         println(typeof(lambda));
@@ -89,11 +95,19 @@ eval(:(lambda = $expr;
 =#
 
 # GEMM:
-expr = AA.optimize(:cache, gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+test_optimize(gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), ())
+test_optimize(gemm_fusing_scalar_add, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), ())
 
-println(expr)
+function Gemm(A, B, C)
+    println("Gemming A*B + C")
+    return A * B + C
+end
 
-#expr  = AA.optimize(:cache, gemm_fusing_scalar_add, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
+cache = CC.GLOBAL_CI_CACHE
+expr  = AA.optimize(gemm_replacement, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec(); cache = cache)
+
+gemm_replacement(A, B, C)
+
 #expr  = AA.optimize(:cache, gemm_fusing_scalar_mul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
 #expr  = AA.optimize(:cache, gemm_fusing_scalar_addmul, (JLArray{Float32, 2}, JLArray{Float32, 2}, JLArray{Float32, 2}), Core.svec())
 

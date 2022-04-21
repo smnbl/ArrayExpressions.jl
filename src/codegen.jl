@@ -47,11 +47,11 @@ function codegen_ssa!(arrexpr)
 
     # replace relative SSAValues with absolute ones
     for (stmt_loc, stmt) in enumerate(stmts)
-        if stmt isa Expr
+        if stmt isa ArrayExpr
             for (arg_loc, arg) in enumerate(stmt.args)
-                if arg isa SSAValue
-                    stmt.args[arg_loc] = Core.SSAValue(stmt_loc - arg.id)
-                elseif arg isa ArrayExpr # input annotations
+                if arg isa TempSSAValue
+                    stmt.args[arg_loc] = TempSSAValue(stmt_loc - arg.id)
+                elseif arg isa ArrayExpr # input expressions
                     stmt.args[arg_loc] = arg.args[2]
                 end
             end
@@ -61,24 +61,25 @@ function codegen_ssa!(arrexpr)
     return stmts
 end
 
+struct TempSSAValue
+    id::Int64
+end
+
 function linearize(arrexpr)
     if arrexpr isa ArrayExpr
         stmts = Any[]
 
         for (ind, arg) in enumerate(arrexpr.args)
             if arg isa ArrayExpr && !(arg.head == :call && arg.args[1] == :input)
-                arrexpr.args[ind] = SSAValue(length(stmts) + 1)
+                arrexpr.args[ind] = TempSSAValue(length(stmts) + 1)
                 append!(stmts, linearize(arg))
+            elseif arg isa ArrayExpr && (arg.head == :call && arg.args[1] == :input && arg.args[2] isa SSAValue)
+                # remove input label from SSAValue arguments
+                arrexpr.args[ind] == arg.args[2]
             end
         end
 
-        if arrexpr.head == :ϕ
-            # PROBLEM
-        elseif arrexpr.head == :->
-            # TODO
-        else
-            return pushfirst!(stmts, Expr(arrexpr.head, arrexpr.args...))
-        end
+        return pushfirst!(stmts, arrexpr)
     else
         throw("please only call on ArrayExpr objects!")
     end

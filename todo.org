@@ -2,6 +2,8 @@
 
 * Metatheory interface upgrades
 
+** TODO Fix separate caching, and make the optimizer put optimized code inside these caches
+
 ** TODO add suport for type checks using type annotations to make them more intuitive (might require modifications to Metatheory.jl)
 look at ways to make Metatheory work with `symtype` from TermInterface to improve type decorations of rewrite rules
 
