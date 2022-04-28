@@ -3,38 +3,35 @@ const CC = Core.Compiler
 
 # lower expression to :-> block
 function codegen_expr!(arrexpr, nargs)
-    args = Array{Any}(undef, nargs)
+    block, input_map = _codegen_expr(arrexpr)
 
-    # TODO: this will make mistakes when arguments are unused;
-    for i in 1:nargs
-        args[i] = Symbol("var_$(i)")
-    end
+    args = [Symbol("var_$i") for i in 1:length(input_map)]
 
-    expr = Expr(:->, Expr(:tuple, args...), Expr(:block, _codegen_expr(arrexpr)))
+    Expr(:->, Expr(:tuple, args...), Expr(:block, block)), input_map
 end
 
-function _codegen_expr(arrexpr)
+function _codegen_expr(arrexpr, input_map = Dict{Any, Int}())
     if arrexpr isa ArrayExpr
         for (ind, arg) in enumerate(arrexpr.args)
-            arrexpr.args[ind] = _codegen_expr(arg)
+            arrexpr.args[ind], input_map = _codegen_expr(arg, input_map)
         end
 
         if (arrexpr.head == :app)
-            return Expr(:call, arrexpr.args...)
+            return Expr(:call, arrexpr.args...), input_map
         elseif (arrexpr.head == :call && arrexpr.args[1] == :input)
-            if arrexpr.args[2] isa Core.Argument
-                return Symbol("var_$(arrexpr.args[2].n)")
-            elseif arrexpr.args[2] isa GlobalRef
-                return Symbol(arrexpr.args[2])
+            if arrexpr.args[2] isa Union{Core.Argument, GlobalRef, Core.SSAValue}
+                input = get!(input_map, arrexpr.args[2], length(input_map) + 1)
+
+                return Symbol("var_$(input)"), input_map
             else
                 # literals
-                return arrexpr.args[2]
+                return arrexpr.args[2], input_map
             end
         end
 
-        return convert(Expr, arrexpr)
+        return convert(Expr, arrexpr), input_map
     else
-        return arrexpr
+        return arrexpr, input_map
     end
 end
 

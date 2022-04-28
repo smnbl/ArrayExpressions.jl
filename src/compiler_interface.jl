@@ -64,7 +64,9 @@ end
 CC.InferenceParams(ai::ArrayInterpreter) = ai.inf_params
 # Quickly and easily satisfy the AbstractInterpreter API contract
 CC.OptimizationParams(ai::ArrayInterpreter) = ai.opt_params
-CC.get_world_counter(ai::ArrayInterpreter) = ai.world
+
+# TODO: hack
+CC.get_world_counter(ai::ArrayInterpreter) =  ai.world
 CC.get_inference_cache(ai::ArrayInterpreter) = ai.local_cache
 
 CC.code_cache(ai::ArrayInterpreter) = CC.WorldView(ai.global_cache, CC.get_world_counter(ai))
@@ -99,10 +101,15 @@ function run_passes(interp::ArrayInterpreter, ci::CodeInfo, sv::CC.OptimizationS
     # only optimize tagged function bodies
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
     if (perform_array_opt && interp.optimize)
+        # Get module of the method definition
+        mod = ci.parent.def.module
+
         # Array expression optimizing pass
-        @timeit "arroptim" ir = arroptim_pass(ir)
-        println(ir)
+        @timeit "arroptim" ir = arroptim_pass(ir, mod)
+
     end
+
+    @timeit "compact 1" ir = CC.compact!(ir)
     
     @timeit "Inlining"  ir = CC.ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds)
     # @timeit "verify 2" verify_ir(ir)
@@ -116,7 +123,6 @@ function run_passes(interp::ArrayInterpreter, ci::CodeInfo, sv::CC.OptimizationS
     if (true || Base.JLOptions().debug_level == 2)
         @timeit "verify 3" (CC.verify_ir(ir); CC.verify_linetable(ir.linetable))
     end
-
 
     return ir
 end
@@ -159,19 +165,34 @@ function optimize(f, atype, sparams::C.SimpleVector; extra_rules=Metatheory.Abst
     match::CC.MethodMatch = Base._which(sig)
 
     mi::CC.MethodInstance = CC.specialize_method(match)
-    ci::CodeInfo = CC.typeinf_ext_toplevel(interp, mi)
 
-    # HACK: this is not a proper way of working with world ages (should equal the world age of the calling code?)
     world_age = Base.get_world_counter()
 
     # compile or get from cache
+    #=
     if ci_cache_lookup(cache, mi, world_age, typemax(Cint)) === nothing
-        ci_cache_populate(interp, cache, method_instance, world_age, typemax(Cint))
+        ci_cache_populate(interp, cache, mi, world_age, typemax(Cint))
     end
 
     code_instance = ci_cache_lookup(cache, mi, world_age, typemax(Cint))
+    src = code_instance.inferred
+    =#
 
-    code_info = code_instance.inferred
+    # ci::CodeInfo = CC.typeinf_ext_toplevel(interp, mi)
+    #
+    
+    src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
+    
+    # decompress if Vector{UInt8}
+    if !isa(src, CodeInfo)
+        src = ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any), mi.def, C_NULL, src::Vector{UInt8})::CodeInfo
+    end
+
+    return src
+
+    #=
+    # HACK: this is not a proper way of working with world ages (should equal the world age of the calling code?)
+    =#
 
     # get CI via code cache, ...
 

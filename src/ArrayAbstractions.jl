@@ -1,11 +1,10 @@
 module ArrayAbstractions
+using CUDA
 
 export ArrayIR
 
-using GPUArrays
-
 # types of values that are considered intermediate
-const ValueTypes = Union{AbstractGPUArray}
+ValueTypes = CuArray
 
 # ArrayIR & TermInterface
 include("ir.jl")

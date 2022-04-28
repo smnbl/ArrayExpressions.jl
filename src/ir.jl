@@ -1,5 +1,4 @@
 using Core.Compiler: IRCode, SSAValue, PhiNode
-using GPUArrays
 
 using TermInterface
 
@@ -78,6 +77,13 @@ TI.arguments(e::ArrayExpr) = expr_arguments(e, Val{exprhead(e)}())
 
 # See https://docs.julialang.org/en/v1/devdocs/ast/
 function expr_operation(e::ArrayExpr, ::Union{Val{:call}})
+    # TODO: fix this hack by fixing matching with function objects!
+    if(e.args[1] == Base.Broadcast.materialize)
+        return :materialize
+    elseif (e.args[1] == Base.Broadcast.broadcasted)
+        return :broadcasted
+    end
+
     if (e.args[1] isa ArrayExpr && e.args[1].head == :call && e.args[1].args[1] == :input)
         e.args[1].args[2]
     else

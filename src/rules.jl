@@ -1,4 +1,3 @@
-using Symbolics
 using Metatheory
 using Metatheory: Postwalk, Fixpoint, EGraphs, Chain
 
@@ -7,6 +6,7 @@ const C = Core
 const CC = C.Compiler
 
 using TermInterface
+
 
 ArrayGemm(A, B, C) = error("should still be linked with GemmKernels.jl")
 
@@ -53,7 +53,6 @@ const adjoint_properties = @theory A B begin
 end
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    println("gemming")
     return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
 end
 
@@ -140,12 +139,9 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
     type = tensor_expr.type
     tensor_expr = tensor_expr.args[1]
 
-    println(tensor_expr)
+    # TODO: fix this, typing info is lost :(
+    tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
     
-    # canonicalize broadcasts (classical rewriting)
-    # TODO: this rewriter throws away typing information (stored in metadata) : (
-    # tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
-
     # Equality Saturation
     g = EGraph(tensor_expr; keepmeta = true)
 
@@ -155,11 +151,6 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
 
     # saturate graph
     report = saturate!(g, theories)
-    # dynamic rewrites using an egraph analysis
-    # analyze!(g, ArrayAnalysis)
-
-    # saturate again with the extra analysis info
-    # report = saturate!(g, theory)
 
     # TODO: replace with own cost function
     # astsize: cost function that favors smaller expressions in the equivalence classes

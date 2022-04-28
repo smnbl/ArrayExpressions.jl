@@ -123,7 +123,8 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(cache, min_world, max_world)
+    # hack, as eval updates the world counter
+    wvc = WorldView(cache, CC.get_world_counter(), max_world)
     @assert Core.Compiler.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred

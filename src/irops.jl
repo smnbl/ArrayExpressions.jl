@@ -1,5 +1,6 @@
 const CC = Core.Compiler
 using Core.Compiler: iterate
+using CUDA
 
 using Core: SSAValue
 
@@ -34,7 +35,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             arg_type = CC.widenconst(CC.argextype(arg, ir))
 
-            if arg isa SSAValue && arg_type <: Union{AbstractGPUArray, Number}
+            if arg isa SSAValue # && arg_type <: Union{CuArray, Number}
                 # TODO: stop at functions with side effects?
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
                 visited, arexpr = _extract_slice!(ir, arg, visited=visited)
@@ -44,7 +45,6 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
                 # TODO: add support for matching GlobalRef's to Metatheory.jl?
                 if inst.head == :call && idx == 1 && arg isa GlobalRef ||
                     inst.head == :invoke && idx == 2 && arg isa GlobalRef
-                    println("replacing with func object")
                     arg = getproperty(arg.mod, arg.name)
                 end
 
@@ -68,7 +68,16 @@ function extract_slice!(ir::IRCode, loc::SSAValue)
 end
 
 # Array optimizations pass
-function arroptim_pass(ir::IRCode)
+function arroptim_pass(ir::IRCode, mod)
+    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
+    if (!perform_array_opt)
+        # do nothing
+        return ir
+    end
+    println("arr optimizing")
+
+    println(ir)
+    
     stmts = ir.stmts
     visited = Set()
 
@@ -102,45 +111,23 @@ function arroptim_pass(ir::IRCode)
         println("simplified = $op")
         println("---")
 
-        new_ssa = codegen_ssa!(op)
+        expr, input_map = codegen_expr!(op.args[1], length(ir.argtypes))
 
-        println("insert optimized instructions")
+        println("compiling opaque closure:")
 
-        ssaval = nothing
+        oc = Core.eval(mod, Expr(:opaque_closure, expr))
 
-        compact = CC.IncrementalCompact(ir, true)
-
-        # TODO: can be faster by just determining constant offset and incrementing each SSAValue
-        # TODO: verify if this is all correct
-        ssa_map = Dict()
-        ssaval = SSAValue(-1)
-        for (idx, stmt) in enumerate(new_ssa[1:end - 1])
-            # replace with final SSAValue
-            for (arg_idx, arg) in enumerate(stmt.args)
-                if arg isa TempSSAValue
-                    stmt.args[arg_idx] = ssa_map[arg.id]
-                elseif arg isa SSAValue # mark for renaming
-                    stmt.args[arg_idx] = CC.OldSSAValue(arg.id)
-                end
-            end
-
-            if (stmt.head == :call && stmt.args[1] == :input)
-                # remove input label
-                expr = Expr(stmt.args[2])
-            else
-                expr = convert(Expr, stmt)
-            end
-
-            if (idx == lastindex(new_ssa) - 1) # last statement (don't input output statement)
-                stmts.inst[loc.id] = expr
-            elseif (idx == 1) # first statement / insert before loc
-                ssaval = CC.insert_node!(compact, loc, CC.effect_free(CC.NewInstruction(expr, stmt.type)), false)
-            else
-                ssaval = CC.insert_node!(compact, ssaval, CC.effect_free(CC.NewInstruction(expr, stmt.type)), true)
-            end
-
-            ssa_map[idx] = ssaval
+        arguments = Array{Any}(undef, length(input_map))
+        for (val, idx) in pairs(input_map)
+            println("$(val), $(typeof(val))")
+            arguments[idx] = val
         end
+        
+        compact = CC.IncrementalCompact(ir, true)                
+
+        call_expr =  Expr(:call, oc, arguments...)
+        ssaval = CC.insert_node!(compact, loc, CC.non_effect_free(CC.NewInstruction(call_expr, rettype)), true)
+        ssaval = CC.insert_node!(compact, loc, CC.non_effect_free(CC.NewInstruction(CC.ReturnNode(ssaval), rettype)), true)
 
         next = CC.iterate(compact)
         while (next != nothing)
@@ -149,7 +136,8 @@ function arroptim_pass(ir::IRCode)
 
         ir = CC.finish(compact)
 
-        # for now only replace 1
+        println(ir)
+
         return ir
     end
 
