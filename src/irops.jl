@@ -6,13 +6,12 @@ using Core: SSAValue
 
 # extract expression that resolves to #indx SSA value
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
+#       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
 function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=true)
     inst = ir.stmts[loc.id][:inst]
     type = ir.stmts[loc.id][:type]
 
-    # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
-    push!(visited, loc)
 
     # doesn't work that well atm
     # pure = ir.stmts[loc.id][:flag] & CC.IR_FLAG_EFFECT_FREE != 0
@@ -23,13 +22,11 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
         return visited, ArrayExpr(:call, [:input, loc], CC.widenconst(type))
     end
 
-    # delete visited statement
-    if (modify_ir)
-        ir.stmts.inst[loc.id] = nothing
-    end
-
     if inst isa Expr
         args_op = []
+
+        # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
+        push!(visited, loc.id)
 
         for (idx, arg) in enumerate(inst.args)
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
@@ -53,12 +50,13 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
         end
 
         return visited, ArrayExpr(inst.head, [args_op...], CC.widenconst(type))
+    elseif inst isa CC.GlobalRef
+        # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
+        push!(visited, loc.id)
 
-    elseif inst isa CC.GlobalRef || inst isa CC.PhiNode
         return visited, ArrayExpr(:call, [:input, inst], type)
-    else
-        println("not an expr, but: $inst::$(typeof(inst))")
-        return visited, ArrayExpr(:unknown, [], Union{})
+    else # PhiNodes, etc...
+        return visited, ArrayExpr(:call, [:input, loc], type)
     end
 end
 
@@ -67,8 +65,36 @@ function extract_slice!(ir::IRCode, loc::SSAValue)
     return arir
 end
 
+function replace!(ir::IRCode, visited, expr)
+    loc = maximum(visited)
+
+    let compact = CC.IncrementalCompact(ir, true)
+        next = CC.iterate(compact)
+        while true
+            ((old_idx, idx), stmt) = next[1]
+
+            if (old_idx != loc && old_idx ∈ visited)
+                println("deleting")
+                CC.setindex!(compact, nothing, idx)
+            end
+
+            if (old_idx == loc)
+                println("changing")
+                CC.fixup_node(compact, expr)
+                CC.setindex!(compact, expr, idx)
+            end
+
+            next = CC.iterate(compact, next[2])
+            next != nothing || break
+        end
+
+        ir = CC.finish(compact)
+    end
+end
+
 # Array optimizations pass
 function arroptim_pass(ir::IRCode, mod)
+    # check meta tag
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
     if (!perform_array_opt)
         # do nothing
@@ -90,12 +116,20 @@ function arroptim_pass(ir::IRCode, mod)
         # loc ∉ visited || continue
         inst isa Expr || continue
 
+        println(inst.args[1])
+
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(stmts[idx][:type])
-        rettype <: ValueTypes || continue
+    
+        iscopyto_array = inst.head == :call && inst.args[1] == GlobalRef(Main, :copyto!) && CC.widenconst(CC.argextype(inst.args[2], ir)) <: ValueTypes
+
+        rettype <: ValueTypes || iscopyto_array || continue
+
+        line = stmts[idx][:line]
 
         # TODO: optimize whole ir body iteratively
         # extract & optimize array expression that returns
+        # TODO: work with basic blocks and CFG?
         visited, arexpr = _extract_slice!(ir, loc, visited=visited)
 
         # wrap arexpr in output function
@@ -114,28 +148,23 @@ function arroptim_pass(ir::IRCode, mod)
         expr, input_map = codegen_expr!(op.args[1], length(ir.argtypes))
 
         println("compiling opaque closure:")
+        println(expr)
 
         oc = Core.eval(mod, Expr(:opaque_closure, expr))
 
         arguments = Array{Any}(undef, length(input_map))
         for (val, idx) in pairs(input_map)
-            println("$(val), $(typeof(val))")
+            if val isa SSAValue
+                # wrap in OldSSA for compacting
+                val = CC.OldSSAValue(val.id)
+            end
             arguments[idx] = val
         end
-        
-        compact = CC.IncrementalCompact(ir, true)                
 
         call_expr =  Expr(:call, oc, arguments...)
-        ssaval = CC.insert_node!(compact, loc, CC.non_effect_free(CC.NewInstruction(call_expr, rettype)), true)
-        ssaval = CC.insert_node!(compact, loc, CC.non_effect_free(CC.NewInstruction(CC.ReturnNode(ssaval), rettype)), true)
 
-        next = CC.iterate(compact)
-        while (next != nothing)
-            next = CC.iterate(compact, next[2])
-        end
-
-        ir = CC.finish(compact)
-
+        ir = replace!(ir, visited, call_expr)
+        
         println(ir)
 
         return ir

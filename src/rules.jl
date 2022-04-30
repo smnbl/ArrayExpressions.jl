@@ -56,8 +56,16 @@ function Gemm(A::EClass, B::EClass, C::EClass)
     return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
 end
 
+function Gemm!(A::EClass, B::EClass, C::EClass)
+    return ArrayExpr(:call, [:Gemm!, A, B, C], Union{})
+end
+
 function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
     return ArrayExpr(:call, [:GemmWithEpilogue, A, B, C, epilogue], Union{})
+end
+
+function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
+    return ArrayExpr(:call, [:GemmWithEpilogue!, A, B, C, epilogue], Union{})
 end
 
 function gettype(X::EClass)
@@ -83,9 +91,21 @@ const gemm_properties = @theory A B C op d epi begin
     # TODO: how to merge with prefix? prologue?
     # TODO: make sure epilogue is scalar
     broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d])))  where istype(d, Number)
+    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, :el])))  where istype(d, Number)
+
+    # TODO: add support for these type of rules
+    # C = Gemm(A, B, C) => Gemm!(A, B, C)
+    copyto!(C, Gemm(A, B, C)) == Gemm!(A, B, C)
 
     # fuse operations
+    broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
     broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
+    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
+    broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
+
+    # TODO: add support for these type of rules
+    # C = GemmWithEpilogue(A, B, C, epi) => GemmWithEpilogue!(A, B, C, epi)
+    copyto!(C, GemmWithEpilogue(A, B, C, epi)) == GemmWithEpilogue!(A, B, C, epi)
 
     # TODO: add gemm alpha rule
 end

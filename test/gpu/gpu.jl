@@ -4,21 +4,35 @@ using Core.Compiler
 using CUDA
 using GemmKernels
 using BenchmarkTools
+using LinearAlgebra
 
 ## test native target
 include("GPUCompiler.jl/test/definitions/native.jl")
 
-const (M, N, K) = (512, 512, 512)
+const (M, N, K) = (256, 256, 256)
 
-
-function Gemm(A::CuArray, B::CuArray, C::CuArray)
+@inline function Gemm(A::CuArray, B::CuArray, C::CuArray)
+    # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
     return GemmWithEpilogue(A, B, C, identity)
+end
+
+@inline function Gemm!(A, B, C)
+    GemmWithEpilogue!(A, B, C, identity)
 end
 
 # TODO:
 # add prologue?
-function GemmWithEpilogue(A, B, C, epi)
-    println(epi)
+@inline function GemmWithEpilogue(A, B, C, epi)
+    D = similar(C)
+    GemmInterface(A, B, C, D, epi)
+    return D
+end
+
+@inline function GemmWithEpilogue!(A, B, C, epi)
+    GemmInterface(A, B, C, C, epi)
+end
+
+@inline function GemmInterface(A, B, C, D, epi)
     m = size(A, 1)
     k = size(A, 2)
     n = size(B, 2)
@@ -30,11 +44,10 @@ function GemmWithEpilogue(A, B, C, epi)
     a_layout = GemmKernels.BLAS.global_layout(typeof(A), Val(false))
     b_layout = GemmKernels.BLAS.global_layout(typeof(B), Val(false))
 
-    D = similar(C)
-
     conf = GemmKernels.get_config(
             gemm_shape = (M = m, N = n, K = k),
-            operator = Operator.WMMAOp{16, 16, 16, eltype(C)},
+            # TODO: gemmkernels interface changes here in latest version: .., eltype(C)}
+            operator = Operator.WMMAOp{16, 16, 16},
 
             global_a_layout = a_layout,
             global_b_layout = b_layout,
@@ -51,23 +64,30 @@ function GemmWithEpilogue(A, B, C, epi)
                                 )
     GemmKernels.matmul(A, B, C, D, conf;
                        #transform_shared_to_regs_a = ...
-                       transform_shared_to_regs_c = GemmKernels.Transform.Elementwise(epi),
+                       transform_regs_to_shared_d = GemmKernels.Transform.Elementwise(epi),
                        kernel = GemmKernels.BLAS.kernel(a_layout, b_layout)
                       )
-    return D
 end
 
 @array_opt function gemm_fusion(A, B, C)
-    return A * B + C
+    for _ in 1:1000
+        copyto!(C, A * B + C)
+    end
+    return C
 end
 
+relu(x) = max(0.0, x)
+
 @array_opt function gemm_fusion_scalar_add(A, B, C)
-    return A * B + C .* 2.0
+    for _ in 1:1000
+        copyto!(C, relu.(A * B + C .+ 2.0))
+    end
+    return C
 end
 
 A = CuArray(rand(Float16, (M, K)))
 B = CuArray(rand(Float16, (K, N)))
-C = CuArray(rand(Float16, (M, N)))
+C = CuArray(rand(Float32, (M, N)))
 
 cache = ArrayAbstractions.CodeCache()
 
@@ -75,35 +95,32 @@ args = Core.typeof.([A, B, C])
 
 ci  = AA.optimize(gemm_fusion, (args), Core.svec(); cache = cache)
 # TODO: add check if indeed replaced
+println(ci)
 
 @generated generated_fusion(A, B, C) = ci
-CUDA.@sync println(isapprox(Array(generated_fusion(A, B, C)), Array(gemm_fusion(A, B, C))))
+println(isapprox(Array(generated_fusion(A, B, C)), Array(gemm_fusion(A, B, C))))
 
-println("before:")
-CUDA.@time CUDA.@sync gemm_fusion(A, B, C)
-println("after:")
-CUDA.@time CUDA.@sync generated_fusion(A, B, C)
+println("gemm: before:")
+@time CUDA.@sync gemm_fusion(A, B, C)
 
-# SECOND test
-A = CuArray(rand(Float16, (M, K)))
-B = CuArray(rand(Float16, (K, N)))
-C = CuArray(rand(Float16, (M, N)))
+println("gemm: after:")
+@time CUDA.@sync generated_fusion(A, B, C)
+
 
 ci  = AA.optimize(gemm_fusion_scalar_add, (args), Core.svec(); cache = cache)
 # TODO: add check if indeed replaced
+println(ci)
 
 @generated generated_fusion_scalar_add(A, B, C) = ci
-CUDA.@sync println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C))))
-A = CuArray(rand(Float16, (M, K)))
-B = CuArray(rand(Float16, (K, N)))
-C = CuArray(rand(Float16, (M, N)))
-println("before:")
-CUDA.@time CUDA.@sync gemm_fusion_scalar_add(A, B, C)
-A = CuArray(rand(Float16, (M, K)))
-B = CuArray(rand(Float16, (K, N)))
-C = CuArray(rand(Float16, (M, N)))
-println("after")
-CUDA.@time CUDA.@sync generated_fusion_scalar_add(A, B, C)
+
+println("benchmarking...")
+
+println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C))))
+println("epi: before:")
+@time CUDA.@sync gemm_fusion_scalar_add(A, B, C)
+
+println("epi: after")
+@time CUDA.@sync generated_fusion_scalar_add(A, B, C)
 
 
 #=
