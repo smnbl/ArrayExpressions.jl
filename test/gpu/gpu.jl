@@ -79,8 +79,14 @@ end
 relu(x) = max(0.0, x)
 
 @array_opt function gemm_fusion_scalar_add(A, B, C)
-    for _ in 1:1000
-        copyto!(C, relu.(A * B + C .+ 2.0))
+    for i in 1:100
+        T = A * B
+        if (i > 100)
+            println("test")
+        end
+        T += C
+        T = T .+ i
+        copyto!(C, relu.(T))
     end
     return C
 end
@@ -98,7 +104,7 @@ ci  = AA.optimize(gemm_fusion, (args), Core.svec(); cache = cache)
 println(ci)
 
 @generated generated_fusion(A, B, C) = ci
-println(isapprox(Array(generated_fusion(A, B, C)), Array(gemm_fusion(A, B, C))))
+CUDA.@sync println(isapprox(Array(generated_fusion(A, B, C)), Array(gemm_fusion(A, B, C)), rtol=1.0))
 
 println("gemm: before:")
 @time CUDA.@sync gemm_fusion(A, B, C)
@@ -115,7 +121,8 @@ println(ci)
 
 println("benchmarking...")
 
-println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C))))
+CUDA.@sync println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0))
+
 println("epi: before:")
 @time CUDA.@sync gemm_fusion_scalar_add(A, B, C)
 

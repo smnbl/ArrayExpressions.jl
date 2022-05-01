@@ -8,7 +8,7 @@ using Core: SSAValue
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 #       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
-function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=true)
+function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true)
     inst = ir.stmts[loc.id][:inst]
     type = ir.stmts[loc.id][:type]
 
@@ -32,7 +32,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             arg_type = CC.widenconst(CC.argextype(arg, ir))
 
-            if arg isa SSAValue # && arg_type <: Union{CuArray, Number}
+            if arg isa SSAValue
                 # TODO: stop at functions with side effects?
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
                 visited, arexpr = _extract_slice!(ir, arg, visited=visited)
@@ -61,7 +61,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Set(), modify_ir=tru
 end
 
 function extract_slice!(ir::IRCode, loc::SSAValue)
-    _, arir, _ = _extract_slice!(ir, loc, visited=Set())
+    _, arir, _ = _extract_slice!(ir, loc, visited=Int64[])
     return arir
 end
 
@@ -73,19 +73,26 @@ function replace!(ir::IRCode, visited, expr)
         while true
             ((old_idx, idx), stmt) = next[1]
 
-            if (old_idx != loc && old_idx ∈ visited)
-                println("deleting")
-                CC.setindex!(compact, nothing, idx)
-            end
-
             if (old_idx == loc)
                 println("changing")
                 CC.fixup_node(compact, expr)
-                CC.setindex!(compact, expr, idx)
+                CC.setindex!(compact.result[idx], expr, :inst)
             end
 
             next = CC.iterate(compact, next[2])
             next != nothing || break
+        end
+
+        for old_idx in visited
+            if old_idx != loc
+                idx = compact.ssa_rename[old_idx].id
+                compact.used_ssas[idx] -= 1
+                if compact.used_ssas[idx] == 0
+                    println("deleting")
+                    CC.setindex!(compact.result[idx], nothing, :inst)
+                end
+            end
+
         end
 
         ir = CC.finish(compact)
@@ -105,7 +112,7 @@ function arroptim_pass(ir::IRCode, mod)
     println(ir)
     
     stmts = ir.stmts
-    visited = Set()
+    visited = Int64[]
 
     # start backwards
     for idx in length(stmts):-1:1
