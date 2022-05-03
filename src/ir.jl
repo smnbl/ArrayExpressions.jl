@@ -8,11 +8,19 @@ const TI = TermInterface
 
 const InputTypes = Any
 
+
+struct Input
+    val::Any
+    type::Type
+end
+
 struct ArrayExpr
     head::Any
     args::Vector{Any}
     type::Type
 end
+
+const ArrayIR = Union{Input, ArrayExpr}
 
 import Base.(==)
 (==)(a::ArrayExpr, b::ArrayExpr) = a.head == b.head && a.args == b.args
@@ -31,10 +39,14 @@ function Phi(edges, values, type=Union{})
     return ArrayExpr(:ϕ, [edges, values], type)
 end
 
+function Base.show(io::IO, e::Input)
+    print(io, "→$(e.val)")
+end
+
 function Base.show(io::IO, e::ArrayExpr)
     start = 1
     if e.head == :call
-        print(io, "$(e.args[1])(")
+        println(io, "$(e.args[1])(")
         start = 2
     elseif e.head == :invoke
         print(io, "$(e.args[2])(")
@@ -58,7 +70,7 @@ function Base.show(io::IO, e::ArrayExpr)
 
     for arg in e.args[start:end-1]
         Base.show(io, arg)
-        print(io, ", ")
+        print(io, ",\n ")
     end
     if length(e.args) > 0
         Base.show(io, e.args[end])
@@ -84,19 +96,25 @@ function expr_operation(e::ArrayExpr, ::Union{Val{:call}})
         return :broadcasted
     end
 
+    e.args[1]
+    #= FIXME BY FIXING MATCHING
     if (e.args[1] isa ArrayExpr && e.args[1].head == :call && e.args[1].args[1] == :input)
         e.args[1].args[2]
     else
         e.args[1]
     end
+    =#
 end
 
 function expr_operation(e::ArrayExpr, ::Union{Val{:invoke}})
+    e.args[1]
+    #= FIXME BY FIXING MATCHING
     if (e.args[2] isa ArrayExpr && e.args[2].head == :call && e.args[2].args[1] == :input)
         e.args[2].args[2]
     else
         e.args[2]
     end
+    =#
 end
 
 expr_arguments(e::ArrayExpr, ::Union{Val{:call}}) = e.args[2:end]
@@ -107,6 +125,7 @@ expr_arguments(e::ArrayExpr, _) = e.args
 
 # Add type info via metadata
 TI.metadata(e::ArrayExpr) = (type = e.type)
+TI.metadata(e::Input) = (type = e.type)
 
 # will be fixed in later release of Metatheory
 function TI.similarterm(x::ArrayExpr, head, args, symtype = nothing; metadata = nothing, exprhead = :call)

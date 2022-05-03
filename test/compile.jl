@@ -9,9 +9,7 @@ using Base: llvmcall
 module TestRuntime
     # dummy methods
     signal_exception() = return
-    # HACK: if malloc returns 0 or traps, all calling functions (like jl_box_*)
-    #       get reduced to a trap, which really messes with our test suite.
-    malloc(sz) = Ptr{Cvoid}(Int(0xDEADBEEF))
+    malloc(sz) = ccall("extern malloc", llvmcall, Csize_t, (Csize_t,), sz)
     report_oom(sz) = return
     report_exception(ex) = return
     report_exception_name(ex) = return
@@ -29,21 +27,22 @@ function native_job_with_pass(@nospecialize(func), @nospecialize(types), extra_p
 end
 
 
-function compile(func, argtype, args)
-    job, _ = native_job_with_pass(func, (argtype), [ArrayAbstractions.arroptim_pass])
+function compile(func, argtype, args; extra_rules=[])
+    pass = ArrOptimPass(extra_rules=extra_rules)
+    job, _ = native_job_with_pass(func, (argtype), [pass])
     mi, _ = GPUCompiler.emit_julia(job)
 
     ctx = JuliaContext()
 
-    ir, ir_meta = GPUCompiler.emit_llvm(job, mi; ctx)
+    ir, ir_meta = GPUCompiler.emit_llvm(job, mi; ctx, libraries=false)
 
     compiled = ir_meta[2]
+
     rettype = compiled[mi].ci.rettype
 
     fn = LLVM.name(ir_meta.entry)
     @assert !isempty(fn)
     rettype = rettype
-    ctx = JuliaContext()
     
     quote
         Base.@inline
@@ -53,12 +52,10 @@ end
 
 #=
 function hello(x)
-    println("Hello $x")
+    println("hello world :) $x")
 end
 
-println(compile(hello, [Int32], [:x]))
+@eval f(x) = $(compile(hello, Tuple{{Int64}, [:x]))
 
-@eval f(x) = $(compile(hello, Tuple{Int32}, [:x]))
-
-f(Int32(10))
+f(11)
 =#

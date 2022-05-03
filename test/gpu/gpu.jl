@@ -6,33 +6,40 @@ using GemmKernels
 using BenchmarkTools
 using LinearAlgebra
 
-## test native target
-include("GPUCompiler.jl/test/definitions/native.jl")
+include("../compile.jl")
 
 const (M, N, K) = (256, 256, 256)
 
-@inline function Gemm(A::CuArray, B::CuArray, C::CuArray)
-    # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
-    return GemmWithEpilogue(A, B, C, identity)
+# for a fair comparison
+function (Base.:*)(A::CuMatrix, B::CuMatrix)
+    C = CuMatrix{Float32}(undef, size(A))
+    # C = 1.0 * A*B + 0.0 * C
+    Gemm!(A, B, C, 1.0, 0.0)
+    return C
 end
 
-@inline function Gemm!(A, B, C)
-    GemmWithEpilogue!(A, B, C, identity)
+@inline function Gemm(A::CuMatrix, B::CuMatrix, C::CuMatrix, alpha=1.0, beta=1.0)
+    # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
+    return GemmWithEpilogue(A, B, C, identity, alpha, beta)
+end
+
+@inline function Gemm!(A, B, C, alpha=1.0, beta=1.0)
+    GemmWithEpilogue!(A, B, C, identity, alpha, beta)
 end
 
 # TODO:
 # add prologue?
-@inline function GemmWithEpilogue(A, B, C, epi)
+@inline function GemmWithEpilogue(A, B, C, epi, alpha=1.0, beta=1.0)
     D = similar(C)
-    GemmInterface(A, B, C, D, epi)
+    GemmInterface(A, B, C, D, epi, alpha, beta)
     return D
 end
 
-@inline function GemmWithEpilogue!(A, B, C, epi)
-    GemmInterface(A, B, C, C, epi)
+@inline function GemmWithEpilogue!(A, B, C, epi, alpha=1.0, beta=1.0)
+    GemmInterface(A, B, C, C, epi, alpha, beta)
 end
 
-@inline function GemmInterface(A, B, C, D, epi)
+@inline function GemmInterface(A, B, C, D, epi, alpha=1.0, beta=1.0)
     m = size(A, 1)
     k = size(A, 2)
     n = size(B, 2)
@@ -63,6 +70,7 @@ end
             is_b_col_major = false
                                 )
     GemmKernels.matmul(A, B, C, D, conf;
+                       # TODO: prologues, bias stuff
                        #transform_shared_to_regs_a = ...
                        transform_regs_to_shared_d = GemmKernels.Transform.Elementwise(epi),
                        kernel = GemmKernels.BLAS.kernel(a_layout, b_layout)
@@ -70,7 +78,7 @@ end
 end
 
 @array_opt function gemm_fusion(A, B, C)
-    for _ in 1:1000
+    for i in 1:1000
         copyto!(C, A * B + C)
     end
     return C
@@ -79,16 +87,19 @@ end
 relu(x) = max(0.0, x)
 
 @array_opt function gemm_fusion_scalar_add(A, B, C)
-    for i in 1:100
+    for i in 1:1000
         T = A * B
-        if (i > 100)
-            println("test")
-        end
         T += C
-        T = T .+ i
+# TODO: investigate what happens here?
         copyto!(C, relu.(T))
     end
     return C
+end
+
+@array_opt function gemm_multi(A, B, C)
+    X = A * B + C
+    Y = A * B + C
+    return X, Y
 end
 
 A = CuArray(rand(Float16, (M, K)))
@@ -97,31 +108,33 @@ C = CuArray(rand(Float32, (M, N)))
 
 cache = ArrayAbstractions.CodeCache()
 
-args = Core.typeof.([A, B, C])
+argtype = Tuple{Core.typeof.([A, B, C])...}
 
-ci  = AA.optimize(gemm_fusion, (args), Core.svec(); cache = cache)
 # TODO: add check if indeed replaced
-println(ci)
 
-@generated generated_fusion(A, B, C) = ci
+
+# normal gemm
+
+# TODO: this trick using generated functions seems fragile!!!
+# interpolation happens not as you'd imagine :(
+@eval generated_fusion(A, B, C) = $(compile(gemm_fusion, argtype, [:A, :B, :C]))
+
+# TODO: fix this, why not same values???
 CUDA.@sync println(isapprox(Array(generated_fusion(A, B, C)), Array(gemm_fusion(A, B, C)), rtol=1.0))
+
+println("optimized, benching...")
 
 println("gemm: before:")
 @time CUDA.@sync gemm_fusion(A, B, C)
-
 println("gemm: after:")
 @time CUDA.@sync generated_fusion(A, B, C)
 
-
-ci  = AA.optimize(gemm_fusion_scalar_add, (args), Core.svec(); cache = cache)
-# TODO: add check if indeed replaced
-println(ci)
-
-@generated generated_fusion_scalar_add(A, B, C) = ci
+#=
+# w scalar_add
+# @eval generated_fusion_scalar_add(A, B, C) = $(compile(gemm_fusion_scalar_add, argtype, [:A, :B, :C]))
+# CUDA.@sync println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0))
 
 println("benchmarking...")
-
-CUDA.@sync println(isapprox(Array(generated_fusion_scalar_add(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0))
 
 println("epi: before:")
 @time CUDA.@sync gemm_fusion_scalar_add(A, B, C)
@@ -129,12 +142,6 @@ println("epi: before:")
 println("epi: after")
 @time CUDA.@sync generated_fusion_scalar_add(A, B, C)
 
-
-#=
-GC.@preserve args begin
-        kernel_args = cudaconvert.(args)
-        kernel_tt = Tuple{Core.Typeof.(kernel_args)...}
-        kernel = cufunction(test3, kernel_tt, extra_passes=[ArrayAbstractions.arroptim_pass])
-        kernel(kernel_args...)
-end
+# generated multi
+# @eval generated_multi(A, B, C) = $(compile(gemm_multi, argtype, [:A, :B, :C]))
 =#

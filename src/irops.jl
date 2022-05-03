@@ -10,16 +10,16 @@ using Core: SSAValue
 # visited: set of already visited notes
 function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true)
     inst = ir.stmts[loc.id][:inst]
-    type = ir.stmts[loc.id][:type]
+    type = CC.widenconst(ir.stmts[loc.id][:type])
 
+    # inference boundarys
+    pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter))
 
     # doesn't work that well atm
     # pure = ir.stmts[loc.id][:flag] & CC.IR_FLAG_EFFECT_FREE != 0
-    pure = true
-
     # if statement is not pure we can not extract the instruction
     if (!pure)
-        return visited, ArrayExpr(:call, [:input, loc], CC.widenconst(type))
+        return visited, Input(loc, type)
     end
 
     if inst isa Expr
@@ -38,25 +38,18 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
                 visited, arexpr = _extract_slice!(ir, arg, visited=visited)
                 push!(args_op, arexpr)
             else
-                # function matcher only supports, function name Symbols or function objects (not GlobalRef)
-                # TODO: add support for matching GlobalRef's to Metatheory.jl?
-                if inst.head == :call && idx == 1 && arg isa GlobalRef ||
-                    inst.head == :invoke && idx == 2 && arg isa GlobalRef
-                    arg = getproperty(arg.mod, arg.name)
-                end
-
-                push!(args_op, ArrayExpr(:call, [:input, arg], arg_type))
+                push!(args_op, Input(arg, arg_type))
             end
         end
 
-        return visited, ArrayExpr(inst.head, [args_op...], CC.widenconst(type))
+        return visited, ArrayExpr(inst.head, [args_op...], type)
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
 
-        return visited, ArrayExpr(:call, [:input, inst], type)
+        return visited, Input(inst, type)
     else # PhiNodes, etc...
-        return visited, ArrayExpr(:call, [:input, loc], type)
+        return visited, Input(loc, type)
     end
 end
 
@@ -65,16 +58,24 @@ function extract_slice!(ir::IRCode, loc::SSAValue)
     return arir
 end
 
-function replace!(ir::IRCode, visited, expr)
+function replace!(ir::IRCode, visited, first, call_expr, type, output_map)
     loc = maximum(visited)
 
+    println(loc)
+    println(first.id)
+
+    @assert loc == first.id
+
     let compact = CC.IncrementalCompact(ir, true)
+        # insert tuple call right before first use
+        ssa_tuple = CC.insert_node!(compact, first, CC.non_effect_free(CC.NewInstruction(call_expr, type)))
+
         next = CC.iterate(compact)
         while true
             ((old_idx, idx), stmt) = next[1]
 
             if (old_idx == loc)
-                println("changing")
+                expr = Expr(:call, GlobalRef(Base, :getfield), ssa_tuple, 1)
                 CC.fixup_node(compact, expr)
                 CC.setindex!(compact.result[idx], expr, :inst)
             end
@@ -88,7 +89,6 @@ function replace!(ir::IRCode, visited, expr)
                 idx = compact.ssa_rename[old_idx].id
                 compact.used_ssas[idx] -= 1
                 if compact.used_ssas[idx] == 0
-                    println("deleting")
                     CC.setindex!(compact.result[idx], nothing, :inst)
                 end
             end
@@ -99,38 +99,50 @@ function replace!(ir::IRCode, visited, expr)
     end
 end
 
+export ArrOptimPass
+
+struct ArrOptimPass
+    extra_rules::Vector{Metatheory.AbstractRule}
+
+    ArrOptimPass(; extra_rules=[]) = return new(extra_rules)
+end
+
+
+correct_rettype(rettype) = rettype <: ValueTypes && rettype != Union{}
+
 # Array optimizations pass
-function arroptim_pass(ir::IRCode, mod)
+function (aro::ArrOptimPass)(ir::IRCode, mod)
     # check meta tag
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
-    if (!perform_array_opt)
+    if (false && !perform_array_opt)
+        println("skipping")
         # do nothing
         return ir
     end
-    println("arr optimizing")
 
-    println(ir)
-    
     stmts = ir.stmts
     visited = Int64[]
+    exprs = ArrayIR[]
 
-    # start backwards
+    first = nothing
+
+    # 1. collect expressions
     for idx in length(stmts):-1:1
         inst = stmts.inst[idx]
         
         loc = SSAValue(idx)
 
-        # loc ∉ visited || continue
+        idx ∉ visited || continue
         inst isa Expr || continue
-
-        println(inst.args[1])
 
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(stmts[idx][:type])
     
-        iscopyto_array = inst.head == :call && inst.args[1] == GlobalRef(Main, :copyto!) && CC.widenconst(CC.argextype(inst.args[2], ir)) <: ValueTypes
+        iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
-        rettype <: ValueTypes || iscopyto_array || continue
+        (correct_rettype(rettype) || iscopyto_array) || continue
+
+        println(inst.args)
 
         line = stmts[idx][:line]
 
@@ -139,43 +151,65 @@ function arroptim_pass(ir::IRCode, mod)
         # TODO: work with basic blocks and CFG?
         visited, arexpr = _extract_slice!(ir, loc, visited=visited)
 
-        # wrap arexpr in output function
-        # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
-        # equivalent to expressions that only contain SSAValues inside its arguments
-        arexpr = ArrayExpr(:output, [arexpr], rettype)
-
-        println(arexpr)
-
-        println(">>>")
-
-        op = simplify(arexpr)
-        println("simplified = $op")
-        println("---")
-
-        expr, input_map = codegen_expr!(op.args[1], length(ir.argtypes))
-
-        println("compiling opaque closure:")
-        println(expr)
-
-        oc = Core.eval(mod, Expr(:opaque_closure, expr))
-
-        arguments = Array{Any}(undef, length(input_map))
-        for (val, idx) in pairs(input_map)
-            if val isa SSAValue
-                # wrap in OldSSA for compacting
-                val = CC.OldSSAValue(val.id)
-            end
-            arguments[idx] = val
+        if first == nothing
+            first = CC.OldSSAValue(idx)
         end
 
-        call_expr =  Expr(:call, oc, arguments...)
+        push!(exprs, arexpr)
+    end
 
-        ir = replace!(ir, visited, call_expr)
-        
-        println(ir)
-
+    # if nothing found, just return ir
+    if (isempty(exprs))
         return ir
     end
+
+    println("arr optimizing")
+    println(ir)
+
+    # 2. construct output tuple
+    # wrap arexpr in output function
+    # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
+    # equivalent to expressions that only contain SSAValues inside its arguments
+    tuple_type = Tuple{map(x -> x.type, exprs)...}
+    println(tuple_type)
+    tuple = ArrayExpr(:tuple, exprs, tuple_type)
+    output = ArrayExpr(:output, [tuple], tuple.type)
+
+    println(output)
+
+    println(">>>")
+
+    # 3. jointly optimize output tuple
+    op = simplify(output, extra_rules=aro.extra_rules)
+    println("simplified = $op")
+    println("---")
+
+    # 4. insert optimized expression back
+    expr, input_map = codegen_expr!(op.args[1], length(ir.argtypes))
+
+    println("compiling opaque closure:")
+    println(expr)
+
+    oc = Core.eval(mod, Expr(:opaque_closure, expr))
+
+    arguments = Array{Any}(undef, length(input_map))
+    for (val, idx) in pairs(input_map)
+        if val isa SSAValue
+            # wrap in OldSSA for compacting
+            val = CC.OldSSAValue(val.id)
+        end
+        arguments[idx] = val
+    end
+
+    println(arguments)
+
+    call_expr =  Expr(:call, oc, arguments...)
+
+    # TODO: add output map
+    ir = replace!(ir, visited, first, call_expr, tuple_type, nothing)
+    
+    println(ir)
+
 
     return ir
 end

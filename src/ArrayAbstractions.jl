@@ -8,7 +8,7 @@ ValueTypes = CuArray
 
 # ArrayIR & TermInterface
 include("ir.jl")
-include("irutils.jl")
+include("utils.jl")
 
 # interface with Core.Compiler
 include("codecache.jl")

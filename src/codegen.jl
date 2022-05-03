@@ -18,18 +18,13 @@ function _codegen_expr(arrexpr, input_map = Dict{Any, Int}())
 
         if (arrexpr.head == :app)
             return Expr(:call, arrexpr.args...), input_map
-        elseif (arrexpr.head == :call && arrexpr.args[1] == :input)
-            if arrexpr.args[2] isa Union{Core.Argument, GlobalRef, Core.SSAValue}
-                input = get!(input_map, arrexpr.args[2], length(input_map) + 1)
-
-                return Symbol("var_$(input)"), input_map
-            else
-                # literals
-                return arrexpr.args[2], input_map
-            end
         end
 
         return convert(Expr, arrexpr), input_map
+    elseif arrexpr isa Input
+        input = get!(input_map, arrexpr.val, length(input_map) + 1)
+
+        return Symbol("var_$(input)"), input_map
     else
         return arrexpr, input_map
     end
@@ -37,6 +32,7 @@ end
 
 # reconstructs SSA IR from arrexpr
 # for use with the OC SSA IR interface: (https://github.com/JuliaLang/julia/pull/44197)
+#= OLD CODE
 function codegen_ssa!(arrexpr)
     # TODO insert return node!
     # linearize
@@ -63,16 +59,16 @@ struct TempSSAValue
 end
 
 function linearize(arrexpr)
-    if arrexpr isa ArrayExpr
+    if arrexpr isa Union{ArrayExpr, Input}
         stmts = Any[]
 
         for (ind, arg) in enumerate(arrexpr.args)
-            if arg isa ArrayExpr && !(arg.head == :call && arg.args[1] == :input)
+            if arg isa ArrayExpr
                 arrexpr.args[ind] = TempSSAValue(length(stmts) + 1)
                 append!(stmts, linearize(arg))
-            elseif arg isa ArrayExpr && (arg.head == :call && arg.args[1] == :input && arg.args[2] isa SSAValue)
+            elseif arg isa Input && arg.val isa SSAValue
                 # remove input label from SSAValue arguments
-                arrexpr.args[ind] == arg.args[2]
+                arrexpr.args[ind] == arg.val
             end
         end
 
@@ -81,3 +77,4 @@ function linearize(arrexpr)
         throw("please only call on ArrayExpr objects!")
     end
 end
+=#
