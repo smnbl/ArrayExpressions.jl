@@ -1,6 +1,5 @@
-using Symbolics
 using Metatheory
-using Metatheory: Postwalk, Fixpoint, EGraphs, Chain
+using Metatheory: Postwalk, Fixpoint, EGraphs, Chain, car, islist
 
 using Core.Compiler
 const C = Core
@@ -8,7 +7,27 @@ const CC = C.Compiler
 
 using TermInterface
 
-ArrayGemm(A, B, C) = error("should still be linked with GemmKernels.jl")
+# TODO: proper mod handling in matching GlobalRefs
+# TODO: overwriting like this is not allowed (find better way) !
+# only works for the classical rewriters
+function Metatheory.head_matcher(f::Symbol, mod)
+    # x will always be GlobalRef
+    checkhead = (x) -> isequal(x, f) || (x isa GlobalRef && isequal(x.name, f))
+
+    function head_matcher(next, data, bindings)
+        h = car(data)
+        if h isa Input
+            h = h.val
+        end
+        if islist(data) && checkhead(h)
+            next(bindings, 1)
+        else 
+            nothing
+        end
+    end
+end
+
+# TODO: egraphs use another way of comparing operations, check the compile_pat! function in ematch compiler
 
 # canonicalize broadcasts using classic term rewriting
 const canonicalize_broadcasting = @theory A B op begin
@@ -22,7 +41,7 @@ end
 #
 const addition_properties = @theory A B C begin
     # commutativity
-    broadcast(+, A, B) == broadcast(+, B, A)
+    A + B == B + A
 
     # associativity
     broadcast(+, broadcast(+, A, B), C) == broadcast(+, A, broadcast(+, C, B))
@@ -44,7 +63,6 @@ const multiplication_properties = @theory A B C d begin
     # adjoint
     adjoint(A*B) == adjoint(B)*adjoint(A)
 
-
     # TODO: product with a scalar; confirm it is indeed a scalar (dynamic rules?)
 end
 
@@ -53,12 +71,19 @@ const adjoint_properties = @theory A B begin
 end
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    println("gemming")
     return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
+end
+
+function Gemm!(A::EClass, B::EClass, C::EClass)
+    return ArrayExpr(:call, [:Gemm!, A, B, C], Union{})
 end
 
 function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
     return ArrayExpr(:call, [:GemmWithEpilogue, A, B, C, epilogue], Union{})
+end
+
+function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
+    return ArrayExpr(:call, [:GemmWithEpilogue!, A, B, C, epilogue], Union{})
 end
 
 function gettype(X::EClass)
@@ -67,6 +92,7 @@ function gettype(X::EClass)
 end
 
 function istype(X::EClass, type)
+    println("istype")
     ty = gettype(X)
     return ty <: type
 end
@@ -84,11 +110,33 @@ const gemm_properties = @theory A B C op d epi begin
     # TODO: how to merge with prefix? prologue?
     # TODO: make sure epilogue is scalar
     broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d])))  where istype(d, Number)
+    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, :el])))  where istype(d, Number)
+
+    # TODO: add support for these type of rules
+    # C = Gemm(A, B, C) => Gemm!(A, B, C)
+    copyto!(C, Gemm(A, B, C)) == Gemm!(A, B, C)
 
     # fuse operations
+    broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
     broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
+    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
+    broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
+
+    # TODO: add support for these type of rules
+    # C = GemmWithEpilogue(A, B, C, epi) => GemmWithEpilogue!(A, B, C, epi)
+    copyto!(C, GemmWithEpilogue(A, B, C, epi)) == GemmWithEpilogue!(A, B, C, epi)
 
     # TODO: add gemm alpha rule
+end
+
+# big rewrite rules with custom implementations
+const gemm_properties_classical = @theory A B C op d epi begin
+    # GEMM;
+    # TODO: make sure A, B, C is a matrix, and not a scalar!!
+    # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
+    # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
+    (A*B) + C --> Gemm(A, B, C)
+    copyto!(C, Gemm(A, B, C)) --> Gemm!(A, B, C)
 end
 
 # TODO: add map(reduce()) -> mapreduce() rule & other map/reduce rules 
@@ -140,12 +188,10 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
     type = tensor_expr.type
     tensor_expr = tensor_expr.args[1]
 
-    println(tensor_expr)
+    # TODO: fix this, typing info is lost :(
+    tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
+    tensor_expr = Postwalk(Chain(gemm_properties_classical))(tensor_expr)
     
-    # canonicalize broadcasts (classical rewriting)
-    # TODO: this rewriter throws away typing information (stored in metadata) : (
-    # tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
-
     # Equality Saturation
     g = EGraph(tensor_expr; keepmeta = true)
 
@@ -155,11 +201,6 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
 
     # saturate graph
     report = saturate!(g, theories)
-    # dynamic rewrites using an egraph analysis
-    # analyze!(g, ArrayAnalysis)
-
-    # saturate again with the extra analysis info
-    # report = saturate!(g, theory)
 
     # TODO: replace with own cost function
     # astsize: cost function that favors smaller expressions in the equivalence classes

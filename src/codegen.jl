@@ -3,43 +3,36 @@ const CC = Core.Compiler
 
 # lower expression to :-> block
 function codegen_expr!(arrexpr, nargs)
-    args = Array{Any}(undef, nargs)
+    block, input_map = _codegen_expr(arrexpr)
 
-    # TODO: this will make mistakes when arguments are unused;
-    for i in 1:nargs
-        args[i] = Symbol("var_$(i)")
-    end
+    args = [Symbol("var_$i") for i in 1:length(input_map)]
 
-    expr = Expr(:->, Expr(:tuple, args...), Expr(:block, _codegen_expr(arrexpr)))
+    Expr(:->, Expr(:tuple, args...), Expr(:block, block)), input_map
 end
 
-function _codegen_expr(arrexpr)
+function _codegen_expr(arrexpr, input_map = Dict{Any, Int}())
     if arrexpr isa ArrayExpr
         for (ind, arg) in enumerate(arrexpr.args)
-            arrexpr.args[ind] = _codegen_expr(arg)
+            arrexpr.args[ind], input_map = _codegen_expr(arg, input_map)
         end
 
         if (arrexpr.head == :app)
-            return Expr(:call, arrexpr.args...)
-        elseif (arrexpr.head == :call && arrexpr.args[1] == :input)
-            if arrexpr.args[2] isa Core.Argument
-                return Symbol("var_$(arrexpr.args[2].n)")
-            elseif arrexpr.args[2] isa GlobalRef
-                return Symbol(arrexpr.args[2])
-            else
-                # literals
-                return arrexpr.args[2]
-            end
+            return Expr(:call, arrexpr.args...), input_map
         end
 
-        return convert(Expr, arrexpr)
+        return convert(Expr, arrexpr), input_map
+    elseif arrexpr isa Input
+        input = get!(input_map, arrexpr.val, length(input_map) + 1)
+
+        return Symbol("var_$(input)"), input_map
     else
-        return arrexpr
+        return arrexpr, input_map
     end
 end
 
 # reconstructs SSA IR from arrexpr
 # for use with the OC SSA IR interface: (https://github.com/JuliaLang/julia/pull/44197)
+#= OLD CODE
 function codegen_ssa!(arrexpr)
     # TODO insert return node!
     # linearize
@@ -66,16 +59,16 @@ struct TempSSAValue
 end
 
 function linearize(arrexpr)
-    if arrexpr isa ArrayExpr
+    if arrexpr isa Union{ArrayExpr, Input}
         stmts = Any[]
 
         for (ind, arg) in enumerate(arrexpr.args)
-            if arg isa ArrayExpr && !(arg.head == :call && arg.args[1] == :input)
+            if arg isa ArrayExpr
                 arrexpr.args[ind] = TempSSAValue(length(stmts) + 1)
                 append!(stmts, linearize(arg))
-            elseif arg isa ArrayExpr && (arg.head == :call && arg.args[1] == :input && arg.args[2] isa SSAValue)
+            elseif arg isa Input && arg.val isa SSAValue
                 # remove input label from SSAValue arguments
-                arrexpr.args[ind] == arg.args[2]
+                arrexpr.args[ind] == arg.val
             end
         end
 
@@ -84,3 +77,4 @@ function linearize(arrexpr)
         throw("please only call on ArrayExpr objects!")
     end
 end
+=#
