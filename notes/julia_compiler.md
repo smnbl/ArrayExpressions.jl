@@ -92,5 +92,10 @@ Tfunc seems short for **transfer function**, they define the type transfer funct
 My current theory is that extype stands for 'extended type' aka it stands for an extended lattice element, (which contains extra annotations, added to the Julia base type like Const(..)), it can be converted to a native Julia type using `widenconst`
 
 ## jl_apply_generic
-Function in the C side of things that gets called when specializing a particular method; applied on every :call expression.
+Function in the C side of things that gets called when specializing a particular method and calling a function spec; applied on every :call expression.
+This functions effectively implements dynamic calling / dynamic dispatch.
+
+## jl_invoke
+Implements static dispatch.
+Wrapped in julia by `invoke_api(li::CodeInstance)`.
 
