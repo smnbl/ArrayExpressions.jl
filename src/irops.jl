@@ -37,6 +37,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
                 visited, arexpr = _extract_slice!(ir, arg, visited=visited)
                 push!(args_op, arexpr)
+
             else
                 push!(args_op, Input(arg, arg_type))
             end
@@ -59,12 +60,7 @@ function extract_slice!(ir::IRCode, loc::SSAValue)
 end
 
 function replace!(ir::IRCode, visited, first, call_expr, type, output_map)
-    loc = maximum(visited)
-
-    println(loc)
-    println(first.id)
-
-    @assert loc == first.id
+    loc = first.id
 
     let compact = CC.IncrementalCompact(ir, true)
         # insert tuple call right before first use
@@ -102,20 +98,34 @@ end
 export ArrOptimPass
 
 struct ArrOptimPass
+    element_type::Type
     extra_rules::Vector{Metatheory.AbstractRule}
+    mod::Module
 
-    ArrOptimPass(; extra_rules=[]) = return new(extra_rules)
+    ArrOptimPass(eltype; mod=@__MODULE__, extra_rules=[]) = return new(eltype, extra_rules, mod)
 end
 
+# check if instruction matches one of the rules
+function inrules(inst, rules)
+    # TODO: support more besides call instructions
+    if !CC.isexpr(inst, :call)
+        return false
+    end
+    
+    for rule in rules
+        if rule.left.operation == inst.args[1]
+            return true
+        end
+    end
 
-correct_rettype(rettype) = rettype <: ValueTypes && rettype != Union{}
+    return false
+end
 
 # Array optimizations pass
-function (aro::ArrOptimPass)(ir::IRCode, mod)
+function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     # check meta tag
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
     if (false && !perform_array_opt)
-        println("skipping")
         # do nothing
         return ir
     end
@@ -126,10 +136,15 @@ function (aro::ArrOptimPass)(ir::IRCode, mod)
 
     first = nothing
 
+    correct_rettype(rettype) = rettype <: aro.element_type && rettype != Union{}
+
+    # TODO:
+    # iterate over basic blocks
+
     # 1. collect expressions
     for idx in length(stmts):-1:1
         inst = stmts.inst[idx]
-        
+
         loc = SSAValue(idx)
 
         idx ∉ visited || continue
@@ -137,12 +152,17 @@ function (aro::ArrOptimPass)(ir::IRCode, mod)
 
         # check if return type is StubArray and use this to confirm array ir
         rettype = CC.widenconst(stmts[idx][:type])
-    
         iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
-        (correct_rettype(rettype) || iscopyto_array) || continue
+        correct_type = correct_rettype(rettype)
 
-        println(inst.args)
+        if (CC.isexpr(inst, :invoke))
+            println(inst)
+        end
+
+        # TODO: do for all rules!
+        # TODO: bench hom much speedup due to inrules!
+        (correct_type && inrules(inst, aro.extra_rules) || iscopyto_array) || continue
 
         line = stmts[idx][:line]
 
@@ -159,24 +179,19 @@ function (aro::ArrOptimPass)(ir::IRCode, mod)
     end
 
     # if nothing found, just return ir
-    if (isempty(exprs))
+    # TODO: add outputmap
+    if (length(exprs) > 1 || isempty(exprs) || all(map(el -> el isa Input, exprs)))
         return ir
     end
-
-    println("arr optimizing")
-    println(ir)
 
     # 2. construct output tuple
     # wrap arexpr in output function
     # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
     # equivalent to expressions that only contain SSAValues inside its arguments
     tuple_type = Tuple{map(x -> x.type, exprs)...}
-    println(tuple_type)
     tuple = ArrayExpr(:tuple, exprs, tuple_type)
     output = ArrayExpr(:output, [tuple], tuple.type)
-
     println(output)
-
     println(">>>")
 
     # 3. jointly optimize output tuple
@@ -193,6 +208,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod)
     oc = Core.eval(mod, Expr(:opaque_closure, expr))
 
     arguments = Array{Any}(undef, length(input_map))
+
     for (val, idx) in pairs(input_map)
         if val isa SSAValue
             # wrap in OldSSA for compacting
@@ -201,15 +217,12 @@ function (aro::ArrOptimPass)(ir::IRCode, mod)
         arguments[idx] = val
     end
 
-    println(arguments)
-
     call_expr =  Expr(:call, oc, arguments...)
 
     # TODO: add output map
     ir = replace!(ir, visited, first, call_expr, tuple_type, nothing)
-    
-    println(ir)
 
+    println(ir)
 
     return ir
 end

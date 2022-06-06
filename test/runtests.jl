@@ -1,6 +1,7 @@
 using ArrayAbstractions
 using Metatheory
 using GPUArrays
+using Test
 
 using Core.Compiler
 using Core.Compiler: IRCode, CodeInfo
@@ -19,5 +20,11 @@ macro test_if(label, expr)
     end
 end
 
+# Unit tests
+#@test_if "array_rules" include("array_rules.jl")
+# TODO: write irops / custom rules unittests
+#@test_if "irops" include("irops.jl")
+
+# Integration tests
 @test_if "gpu" include("gpu/gpu.jl")
-@test_if "flux" include("flux.jl")
+#@test_if "flux" include("flux.jl")

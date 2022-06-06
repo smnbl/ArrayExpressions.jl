@@ -7,39 +7,149 @@ const CC = C.Compiler
 
 using TermInterface
 
-# TODO: proper mod handling in matching GlobalRefs
-# TODO: overwriting like this is not allowed (find better way) !
-# only works for the classical rewriters
-function Metatheory.head_matcher(f::Symbol, mod)
-    # x will always be GlobalRef
-    checkhead = (x) -> isequal(x, f) || (x isa GlobalRef && isequal(x.name, f))
-
-    function head_matcher(next, data, bindings)
-        h = car(data)
-        if h isa Input
-            h = h.val
-        end
-        if islist(data) && checkhead(h)
-            next(bindings, 1)
-        else 
-            nothing
-        end
+# treat as a literal
+function makepattern(x, pvars, slots, mod=@__MODULE__, splat=false) 
+    if splat 
+        x in slots ? Metatheory.Syntax.makesegment(x, pvars) : x
+    else
+        x in slots ? Metatheory.Syntax.makevar(x, pvars) : x
     end
 end
 
-# TODO: egraphs use another way of comparing operations, check the compile_pat! function in ematch compiler
+function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
+    head = exprhead(ex)
+    op = operation(ex)
+    args = arguments(ex)
+
+    if istree(op)
+        op = makepattern(op, pvars, slots, mod)
+    elseif op isa Symbol
+        # TODO: investigate what to supply as mod ?
+        op = QuoteNode(GlobalRef(mod, op))
+    end
+    #throw(Meta.ParseError("Unsupported pattern syntax $ex"))
+    
+    if head === :call
+        if operation(ex) === :(~) # is a variable or segment
+            if args[1] isa Expr && operation(args[1]) == :(~)
+                # matches ~~x::predicate or ~~x::predicate...
+                return Metatheory.Syntax.makesegment(arguments(args[1])[1], pvars)
+            elseif splat
+                # matches ~x::predicate...
+                return Metatheory.Syntax.makesegment(args[1], pvars)
+            else
+                return Metatheory.Syntax.makevar(args[1], pvars)
+            end
+        else # is a term
+            patargs = map(i -> makepattern(i, pvars, slots, mod), args) # recurse
+            return :($PatTerm(:call, $op, [$(patargs...)], $mod))
+        end
+    elseif head === :... 
+        makepattern(args[1], pvars, slots, mod, true)
+    elseif head == :(::) && args[1] in slots
+        return splat ? Metatheory.Syntax.makesegment(ex, pvars) : Metatheory.Syntax.makevar(ex, pvars)
+    elseif head === :ref 
+        # getindex 
+        patargs = map(i -> makepattern(i, pvars, slots, mod), args) # recurse
+        return :($PatTerm(:ref, getindex, [$(patargs...)], $mod))
+    elseif head === :$
+        return args[1]
+    # NEW:
+    elseif head === :.
+        m = resolveref(args[1], mod)
+        return QuoteNode(GlobalRef(m, args[2].value))
+    else 
+        patargs = map(i -> makepattern(i, pvars, slots, mod), args) # recurse
+        return :($PatTerm($(head isa Symbol ? QuoteNode(head) : head), $(op isa Symbol ? QuoteNode(op) : op), [$(patargs...)], $mod))
+        # throw(Meta.ParseError("Unsupported pattern syntax $ex"))
+    end
+end
+
+function resolveref(val, mod)
+    if (CC.isexpr(val, :.))
+        if(val.args[2] isa QuoteNode)
+            val.args[2] = val.args[2].value
+        end
+        getproperty(resolveref(val.args[1], mod), val.args[2])
+    else
+        if (val isa QuoteNode)
+            val = val.value
+        end
+        getproperty(mod, val)
+    end
+end
+
+function addslots(expr, slots)
+    if expr isa Expr
+        if expr.head === :macrocall && expr.args[1] in [Symbol("@rule"), Symbol("@capture"), Symbol("@slots"), Symbol("@array_theory"), Symbol("@array_rule"), Symbol("@array_theory")]
+            Expr(:macrocall, expr.args[1:2]..., slots..., expr.args[3:end]...)
+        else
+            Expr(expr.head, addslots.(expr.args, (slots,))...)
+        end
+    else
+        expr
+    end
+end
+
+
+# based on Metathory's @rule macro
+macro array_rule(args...)
+    length(args) >= 1 || ArgumentError("@rule requires at least one argument")
+    slots = args[1:(end-1)]
+    expr = args[end]
+
+    e = macroexpand(__module__, expr)
+    e = Metatheory.Syntax.rmlines(e)
+    op = operation(e)
+    RuleType = Metatheory.Syntax.rule_sym_map(e)
+    
+    l, r = arguments(e)
+    pvars = Symbol[]
+    lhs = makepattern(l, pvars, slots, __module__)
+    rhs = RuleType <: SymbolicRule ? esc(makepattern(r, [], slots, __module__)) : r
+
+    if RuleType == DynamicRule
+        rhs = Metatheory.Syntax.rewrite_rhs(r)
+        rhs = Metatheory.Syntax.makeconsequent(rhs)
+        params = Expr(:tuple, :_lhs_expr, :_subst, :_egraph, pvars...)
+        rhs =  :($(esc(params)) -> $(esc(rhs)))
+    end
+
+    return quote
+        $(__source__)
+        ($RuleType)($(QuoteNode(expr)), $(esc(lhs)), $rhs)
+    end
+end
+
+# based on Metatheory's @array_theory macro
+macro array_theory(args...)
+    length(args) >= 1 || ArgumentError("@rule requires at least one argument")
+    slots = args[1:(end - 1)]
+    expr = args[end]
+
+    e = macroexpand(__module__, expr)
+    e = Metatheory.Syntax.rmlines(e)
+    # e = interp_dollar(e, __module__)
+
+    if exprhead(e) == :block
+        ee = Expr(:vect, map(x -> addslots(:(@array_rule($x)), slots), arguments(e))...)
+        esc(ee)
+    else
+        error("theory is not in form begin a => b; ... end")
+    end
+end
 
 # canonicalize broadcasts using classic term rewriting
-const canonicalize_broadcasting = @theory A B op begin
-    materialize(A) --> A
-    broadcasted(op, A, B) --> broadcast(op, A, B)
-    broadcasted(op, A) --> broadcast(op, A)
+const canonicalize_broadcasting = @array_theory A B op begin
+    Base.materialize(A) --> A
+    Base.broadcasted(op, A, B) --> Main.broadcast(op, A, B)
+    Base.broadcasted(op, A) --> Main.broadcast(op, A)
     # TODO: generic in nr of arguments
 end
 
 # some mathematical properties of matrices
 #
-const addition_properties = @theory A B C begin
+const addition_properties = @array_theory A B C begin
     # commutativity
     A + B == B + A
 
@@ -52,7 +162,7 @@ const addition_properties = @theory A B C begin
     # TODO: add dynamic identity / neutral element rule
 end
 
-const multiplication_properties = @theory A B C d begin
+const multiplication_properties = @array_theory A B C d begin
     # distributivity of multiplication
     A * (broadcast(+, B, C)) == broadcast(+, A*B, A*C)
     A * (B + C) == A*B + A*C
@@ -66,88 +176,37 @@ const multiplication_properties = @theory A B C d begin
     # TODO: product with a scalar; confirm it is indeed a scalar (dynamic rules?)
 end
 
-const adjoint_properties = @theory A B begin
+const adjoint_properties = @array_theory A B begin
     adjoint(adjoint(A)) == A
 end
 
-function Gemm(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [:Gemm, A, B, C], Union{})
-end
-
-function Gemm!(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [:Gemm!, A, B, C], Union{})
-end
-
-function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [:GemmWithEpilogue, A, B, C, epilogue], Union{})
-end
-
-function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [:GemmWithEpilogue!, A, B, C, epilogue], Union{})
-end
-
 function gettype(X::EClass)
-    ty = getdata(X, MetadataAnalysis, Union{})
-    return ty
+    ty = getdata(X, MetadataAnalysis)
+    if (ty == nothing)
+        Any
+    else
+        ty
+    end
 end
 
 function istype(X::EClass, type)
-    println("istype")
     ty = gettype(X)
+    println("istype $ty <: $type")
     return ty <: type
 end
 
-# big rewrite rules with custom implementations
-const gemm_properties = @theory A B C op d epi begin
-    # GEMM;
-    # TODO: make sure A, B, C is a matrix, and not a scalar!!
-    # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
-    # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
-    (A*B) + C => Gemm(A, B, C) where (istype(A, ValueTypes) && istype(B, ValueTypes) && istype(C, ValueTypes))
-    # (A*B) + C => ArrayExpr(:call, [:Gemm, A, B, C], Union{}) where (istype(A, Matrix) && istype(B, Matrix) && istype(C, Matrix))
-
-    # merge operations in prologue / epilogue
-    # TODO: how to merge with prefix? prologue?
-    # TODO: make sure epilogue is scalar
-    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d])))  where istype(d, Number)
-    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, :el])))  where istype(d, Number)
-
-    # TODO: add support for these type of rules
-    # C = Gemm(A, B, C) => Gemm!(A, B, C)
-    copyto!(C, Gemm(A, B, C)) == Gemm!(A, B, C)
-
-    # fuse operations
-    broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
-    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
-    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
-    broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
-
-    # TODO: add support for these type of rules
-    # C = GemmWithEpilogue(A, B, C, epi) => GemmWithEpilogue!(A, B, C, epi)
-    copyto!(C, GemmWithEpilogue(A, B, C, epi)) == GemmWithEpilogue!(A, B, C, epi)
-
-    # TODO: add gemm alpha rule
+# TODO: why are we implementing these?
+function EGraphs.make(an::Type{MetadataAnalysis}, g::EGraph, n::ENodeLiteral)
+    return typeof(n.value)
 end
-
-# big rewrite rules with custom implementations
-const gemm_properties_classical = @theory A B C op d epi begin
-    # GEMM;
-    # TODO: make sure A, B, C is a matrix, and not a scalar!!
-    # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
-    # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
-    (A*B) + C --> Gemm(A, B, C)
-    copyto!(C, Gemm(A, B, C)) --> Gemm!(A, B, C)
-end
-
-# TODO: add map(reduce()) -> mapreduce() rule & other map/reduce rules 
 
 # TODO: why are we implementing these?
 function EGraphs.make(an::Type{MetadataAnalysis}, g::EGraph, n::ENodeTerm)
-    return Union{}
+    return Any
 end
 
 function EGraphs.join(an::Type{MetadataAnalysis}, a, b)
-    if (a == Union{})
+    if (a == Any)
         return b
     else
         return a
@@ -155,9 +214,9 @@ function EGraphs.join(an::Type{MetadataAnalysis}, a, b)
 end
 
 function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
-    if operation(n) == :GemmWithEpilogue
+    if operation(n) == GlobalRef(Main, :GemmWithEpilogue)
         cost = 1
-    elseif operation(n) == :Gemm
+    elseif operation(n) == GlobalRef(Main, :Gemm)
         cost = 10
     elseif !(exprhead(n) == :call || exprhead(n) == :invoke) || operation(n) == :app || operation(n) == :Lambda
         cost = 0
@@ -177,7 +236,7 @@ end
 
 cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 0
 
-const theory = addition_properties ∪ multiplication_properties ∪ addition_properties ∪ gemm_properties
+const theory = addition_properties ∪ multiplication_properties ∪ addition_properties
 
 # TODO: should we lower dot & plus to map / reduce combos?
 # NOTE: as long as tensor_expr satisfies TermInterface, this will work
@@ -190,7 +249,6 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
 
     # TODO: fix this, typing info is lost :(
     tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
-    tensor_expr = Postwalk(Chain(gemm_properties_classical))(tensor_expr)
     
     # Equality Saturation
     g = EGraph(tensor_expr; keepmeta = true)

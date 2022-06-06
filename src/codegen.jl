@@ -20,11 +20,21 @@ function _codegen_expr(arrexpr, input_map = Dict{Any, Int}())
             return Expr(:call, arrexpr.args...), input_map
         end
 
+        #=
+        # wrap closure expressions inside opaque closures
+        if (arrexpr.head == :->)
+            return Expr(:opaque_closure, convert(Expr, arrexpr)), input_map
+        end
+        =#
+
         return convert(Expr, arrexpr), input_map
     elseif arrexpr isa Input
-        input = get!(input_map, arrexpr.val, length(input_map) + 1)
-
-        return Symbol("var_$(input)"), input_map
+        if (isprimitivetype(typeof(arrexpr.val)) || arrexpr.val isa Core.GlobalRef) 
+            return arrexpr.val, input_map
+        else
+            input = get!(input_map, arrexpr.val, length(input_map) + 1)
+            return Symbol("var_$(input)"), input_map
+        end
     else
         return arrexpr, input_map
     end

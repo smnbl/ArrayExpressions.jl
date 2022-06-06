@@ -12,18 +12,27 @@ const InputTypes = Any
 struct Input
     val::Any
     type::Type
+    Input(val::Any) = new(val, Any)
+    Input(val::Any, type::Type) = new(val, type)
 end
+
+Base.isequal(input::Input, other) = input.val == other
+Base.isequal(other, input::Input) = input.val == other
+Base.isequal(input::Input, input2::Input) = input.val == input2.val
 
 struct ArrayExpr
     head::Any
     args::Vector{Any}
     type::Type
+    ArrayExpr(head, args) = new(head, args, Any)
+    ArrayExpr(head, args, type) = new(head, args, type)
 end
 
 const ArrayIR = Union{Input, ArrayExpr}
 
 import Base.(==)
 (==)(a::ArrayExpr, b::ArrayExpr) = a.head == b.head && a.args == b.args
+           
 
 convert(::Type{Expr}, expr::ArrayExpr) = Expr(expr.head, expr.args...)
 
@@ -90,20 +99,7 @@ TI.arguments(e::ArrayExpr) = expr_arguments(e, Val{exprhead(e)}())
 # See https://docs.julialang.org/en/v1/devdocs/ast/
 function expr_operation(e::ArrayExpr, ::Union{Val{:call}})
     # TODO: fix this hack by fixing matching with function objects!
-    if(e.args[1] == Base.Broadcast.materialize)
-        return :materialize
-    elseif (e.args[1] == Base.Broadcast.broadcasted)
-        return :broadcasted
-    end
-
     e.args[1]
-    #= FIXME BY FIXING MATCHING
-    if (e.args[1] isa ArrayExpr && e.args[1].head == :call && e.args[1].args[1] == :input)
-        e.args[1].args[2]
-    else
-        e.args[1]
-    end
-    =#
 end
 
 function expr_operation(e::ArrayExpr, ::Union{Val{:invoke}})

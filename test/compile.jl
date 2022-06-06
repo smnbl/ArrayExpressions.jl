@@ -21,14 +21,14 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntim
 
 function native_job_with_pass(@nospecialize(func), @nospecialize(types), extra_passes; kernel::Bool=false, entry_abi=:specfunc, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-    target = NativeCompilerTarget(always_inline=true) 
+    target = NativeCompilerTarget(always_inline=true)
     params = TestCompilerParams()
     CompilerJob(target, source, params, entry_abi, extra_passes=extra_passes), kwargs
 end
 
 
-function compile(func, argtype, args; extra_rules=[])
-    pass = ArrOptimPass(extra_rules=extra_rules)
+function compile(func, argtype, args; eltype=AbstractArray, extra_rules=[])
+    pass = ArrOptimPass(eltype, extra_rules=extra_rules)
     job, _ = native_job_with_pass(func, (argtype), [pass])
     mi, _ = GPUCompiler.emit_julia(job)
 
@@ -37,12 +37,10 @@ function compile(func, argtype, args; extra_rules=[])
     ir, ir_meta = GPUCompiler.emit_llvm(job, mi; ctx, libraries=false)
 
     compiled = ir_meta[2]
-
     rettype = compiled[mi].ci.rettype
 
     fn = LLVM.name(ir_meta.entry)
     @assert !isempty(fn)
-    rettype = rettype
     
     quote
         Base.@inline
