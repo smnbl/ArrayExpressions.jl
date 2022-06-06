@@ -21,7 +21,6 @@ const (M, N, K) = ntuple(i -> 512, 3)
     return C
 end
 
-
 @inline function Gemm(A, B, C; alpha=1.0, beta=1.0)
     # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
     return GemmWithEpilogue(A, B, C, identity, alpha=alpha, beta=beta)
@@ -101,7 +100,7 @@ end
 eltype = CuArray
 
 # intergration tests
-gemmcompile(func, argtype, args) = compile(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting)
+gemmcompile(func, argtype, args) = compile(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics)
 
 @array_opt function gemm(A, B, C)
     return A * B + C
@@ -140,18 +139,19 @@ argtype = Tuple{Core.typeof.([A, B, C])...}
 println("optimized, benching...")
 println("epi: before:")
 @time CUDA.@sync begin
-    for _ in 1:1000
+    for _ in 1:10000
         copyto!(C, gemm(A, B, C))
     end
 end
 
 println("epi: after")
 @time CUDA.@sync begin
-    for _ in 1:1000
+    for _ in 1:10000
         copyto!(C, gemm_opt(A, B, C))
     end
 end
 
+#=
 # w scalar_add
 @eval gemm_fusion_scalar_add_opt(A, B, C) = $(gemmcompile(gemm_fusion_scalar_add, argtype, [:A, :B, :C]))
 @test isapprox(Array(gemm_fusion_scalar_add_opt(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0, nans=true)
@@ -171,6 +171,7 @@ println("epi: after")
         copyto!(C, gemm_fusion_scalar_add_opt(A, B, C))
     end
 end
+=#
 
 # generated multi
 # @eval generated_multi(A, B, C) = $(compile(gemm_multi, argtype, [:A, :B, :C]))

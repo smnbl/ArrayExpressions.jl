@@ -21,7 +21,7 @@ include("codegen.jl")
 export @array_theory, @array_rule, istype
 # Equality saturation rules & simplification
 include("rules.jl")
+include("intrinsics.jl")
 include("irops.jl")
-
 
 end # module

@@ -8,11 +8,11 @@ using Core: SSAValue
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 #       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
-function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true)
+function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true, intr_outputs=Dict{Any, Vector{IntrinsicInstance}}())
     inst = ir.stmts[loc.id][:inst]
     type = CC.widenconst(ir.stmts[loc.id][:type])
 
-    # inference boundarys
+    # inference boundaries
     pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter))
 
     # doesn't work that well atm
@@ -20,6 +20,19 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
     # if statement is not pure we can not extract the instruction
     if (!pure)
         return visited, Input(loc, type)
+    end
+
+    # TODO: check this!!
+    # check if we're not crossing an intrinsic which modifies 
+    crossing_intrinsic = arg -> haskey(intr_outputs, arg) && any(el -> el < loc.id, intr_outputs[arg])
+
+    # get last intrinsic that modified the arg
+    last_intrinsic = arg -> begin
+        last = findlast(el -> el < loc.id, intr_outputs[arg])
+        if (last === nothing)
+            return nothing
+        end
+        return intr_outputs[arg][last]
     end
 
     if inst isa Expr
@@ -33,21 +46,38 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
             arg_type = CC.widenconst(CC.argextype(arg, ir))
 
             if arg isa SSAValue
-                # TODO: stop at functions with side effects?
-                # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
-                visited, arexpr = _extract_slice!(ir, arg, visited=visited)
-                push!(args_op, arexpr)
-
+                if crossing_intrinsic(arg)
+                    last = last_intrinsic(arg)
+                    println(last)
+                    # TODO: handle intrinsic
+                    
+                    push!(args_op, Input(arg, arg_type))
+                else
+                    # TODO: stop at functions with side effects?
+                    # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
+                    visited, arexpr = _extract_slice!(ir, arg, visited=visited, intr_outputs=intr_outputs)
+                    push!(args_op, arexpr)
+                end
             else
                 push!(args_op, Input(arg, arg_type))
             end
         end
 
         return visited, ArrayExpr(inst.head, [args_op...], type)
+
+    elseif inst isa SSAValue
+        if crossing_intrinsic(inst)
+            last = last_intrinsic(inst)
+            println(last)
+            # TODO: handle intrinsic
+
+            return visited, Input(inst, type)
+        end
+        return _extract_slice!(ir, inst, visited=visited, intr_outputs=intr_outputs)
+
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
-
         return visited, Input(inst, type)
     else # PhiNodes, etc...
         return visited, Input(loc, type)
@@ -100,25 +130,74 @@ export ArrOptimPass
 struct ArrOptimPass
     element_type::Type
     extra_rules::Vector{Metatheory.AbstractRule}
+    intrinsics::Vector{Intrinsic}
     mod::Module
 
-    ArrOptimPass(eltype; mod=@__MODULE__, extra_rules=[]) = return new(eltype, extra_rules, mod)
+    ArrOptimPass(eltype; mod=@__MODULE__, extra_rules=[], intrinsics=[]) = return new(eltype, extra_rules, intrinsics, mod)
 end
 
 # check if instruction matches one of the rules
 function inrules(inst, rules)
     # TODO: support more besides call instructions
-    if !CC.isexpr(inst, :call)
+    if !(CC.isexpr(inst, :call) || (CC.isexpr(inst, :invoke) && inst.args[2] isa GlobalRef))
         return false
     end
-    
+
     for rule in rules
-        if rule.left.operation == inst.args[1]
-            return true
+        if (CC.isexpr(inst, :call))
+            if rule.left.operation == inst.args[1]
+                return true
+            end
+        else
+            canonical = rule.left.operation
+            op = inst.args[2]
+            if canonical.mod == op.mod &&
+               compare(string(canonical.name), string(op.name))
+                return true
+            end
         end
     end
 
     return false
+end
+
+function inintrinsics(inst, intrinsics)
+    # TODO: support more besides call instructions
+    if !(CC.isexpr(inst, :call))
+        return nothing
+    end
+
+    for intrinsic in intrinsics
+        if (CC.isexpr(inst, :call))
+            op = inst.args[1]
+            if (op isa GlobalRef)
+                if intrinsic.operation == op
+                    return intrinsic
+                end
+            else
+                # TODO: is this right?
+                # might be a kwfunc
+                if op == Core.kwfunc(resolve(intrinsic.operation))
+                    return intrinsic
+                end
+            end
+        else
+            canonical = intrinsic.operation
+            op = inst.args[2]
+            if canonical.mod == op.mod &&
+               compare(string(canonical.name), string(op.name))
+                return intrinsic
+            end
+        end
+    end
+
+    return nothing
+
+end
+
+function compare(canonical_name::String, derived_name::String)
+    pred = x -> x == '#' || isnumeric(x)
+    return canonical_name == strip(pred, derived_name)
 end
 
 # Array optimizations pass
@@ -138,6 +217,34 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     correct_rettype(rettype) = rettype <: aro.element_type && rettype != Union{}
 
+    intr_outputs = Dict{Any, Vector{IntrinsicInstance}}() # arg -> lines that update this arg (indirectly)
+
+    # Forward Pass
+    for idx in 1:length(ir.stmts)
+        # lower invokes to calls
+        inst = ir.stmts.inst[idx]
+        if (CC.isexpr(inst, :invoke))
+            ir.stmts.inst[idx] = Expr(:call, inst.args[2:end]...)
+            inst = ir.stmts.inst[idx]
+        end
+
+        # fix intrinsics
+        intrinsic = inintrinsics(inst, aro.intrinsics)
+        if (intrinsic !== nothing)
+            # check if kwfunc
+            op = inst.args[1]
+
+            # offset from where the arguments start
+            args_offset = if (op isa Function) 3 else 1 end
+
+            for arg in intrinsic.outputs
+                push!(get!(intr_outputs, inst.args[arg + args_offset], []), IntrinsicInstance(idx, intrinsic))
+            end
+            println(intr_outputs)
+        end
+    end
+
+
     # TODO:
     # iterate over basic blocks
 
@@ -154,28 +261,37 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         rettype = CC.widenconst(stmts[idx][:type])
         iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
-        correct_type = correct_rettype(rettype)
+        rule = inrules(inst, aro.extra_rules)
+        intrinsic = inintrinsics(inst, aro.intrinsics)
 
-        if (CC.isexpr(inst, :invoke))
-            println(inst)
-        end
+        #correct_type = correct_rettype(rettype)
 
-        # TODO: do for all rules!
         # TODO: bench hom much speedup due to inrules!
-        (correct_type && inrules(inst, aro.extra_rules) || iscopyto_array) || continue
+        rule || intrinsic !== nothing || continue 
+        # (correct_type #=&& inrules(inst, aro.extra_rules)=# || iscopyto_array) || continue
 
-        line = stmts[idx][:line]
+        if (rule)
+            # TODO: optimize whole ir body iteratively
+            # extract & optimize array expression that returns
+            # TODO: work with basic blocks and CFG?
+            visited, arexpr = _extract_slice!(ir, loc, visited=visited, intr_outputs=intr_outputs)
 
-        # TODO: optimize whole ir body iteratively
-        # extract & optimize array expression that returns
-        # TODO: work with basic blocks and CFG?
-        visited, arexpr = _extract_slice!(ir, loc, visited=visited)
+            if first == nothing
+                first = CC.OldSSAValue(idx)
+            end
 
-        if first == nothing
-            first = CC.OldSSAValue(idx)
+            push!(exprs, arexpr)
+        else
+            # TODO: idea to handle intrinsics:
+            # wrap in sth like (virtually?): f(outputs, inputs) = { intrinsic(outputs, inputs); return outputs }
+            # ? requires forward pass
+
+            # if intrinsic:
+
+            println(ir)
+            println("INTRINSIC:")
+            println(inst.args[2])
         end
-
-        push!(exprs, arexpr)
     end
 
     # if nothing found, just return ir

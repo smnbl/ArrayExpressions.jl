@@ -27,8 +27,8 @@ function native_job_with_pass(@nospecialize(func), @nospecialize(types), extra_p
 end
 
 
-function compile(func, argtype, args; eltype=AbstractArray, extra_rules=[])
-    pass = ArrOptimPass(eltype, extra_rules=extra_rules)
+function compile(func, argtype, args; eltype=AbstractArray, extra_rules=[], intrinsics=[])
+    pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
     job, _ = native_job_with_pass(func, (argtype), [pass])
     mi, _ = GPUCompiler.emit_julia(job)
 

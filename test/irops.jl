@@ -14,3 +14,8 @@ ir = pass(ir, Main)
 
 # test lambdas
 println(ir)
+
+
+# test invoke compare
+
+@test compare("matmul", "#matmul#6")

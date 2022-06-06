@@ -191,7 +191,6 @@ end
 
 function istype(X::EClass, type)
     ty = gettype(X)
-    println("istype $ty <: $type")
     return ty <: type
 end
 

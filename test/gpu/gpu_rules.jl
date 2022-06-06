@@ -1,5 +1,5 @@
 using ArrayAbstractions
-using ArrayAbstractions: App, Lambda
+using ArrayAbstractions: App, Lambda, Intrinsic
 
 struct EpiL{F}
     func::F
@@ -41,7 +41,6 @@ end
 
 # big rewrite rules with custom implementations
 const gemm_properties = @array_theory A B C op d epi begin
-    # GEMM;
     # TODO: make sure A, B, C is a matrix, and not a scalar!!
     # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
     # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
@@ -70,3 +69,10 @@ const gemm_properties = @array_theory A B C op d epi begin
 
     # TODO: add gemm alpha rule
 end
+
+# TODO:
+# what determines how deep an intrinsic goes?
+const gpu_intrinsics = [Intrinsic(GlobalRef(CUDA.CUBLAS, :gemm_dispatch!), [1], [2,3]),
+                        Intrinsic(GlobalRef(Main, :Gemm!), [3], [1,2])]
+
+# TODO: GemmKernels.matmul intrinsic
