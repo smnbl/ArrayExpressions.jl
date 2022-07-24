@@ -12,23 +12,37 @@ end
 
 function _codegen_expr(arrexpr, input_map = Dict{Any, Int}())
     if arrexpr isa ArrayExpr
-        for (ind, arg) in enumerate(arrexpr.args)
-            arrexpr.args[ind], input_map = _codegen_expr(arg, input_map)
+        # start of arguments to recurse into
+        start = if iscall(arrexpr, :intrinsic) 3 else 1 end
+
+        for (ind, arg) in enumerate(arrexpr.args[start:end])
+            arrexpr.args[ind+start - 1], input_map = _codegen_expr(arg, input_map)
         end
 
         if (arrexpr.head == :app)
             return Expr(:call, arrexpr.args...), input_map
         end
 
-        #=
-        # wrap closure expressions inside opaque closures
-        if (arrexpr.head == :->)
-            return Expr(:opaque_closure, convert(Expr, arrexpr)), input_map
+        if (iscall(arrexpr, :intrinsic))
+            # remove intrinsic metadata
+            println(arrexpr.args)
+
+            # will be wrapped in an Input field
+            instance = arrexpr.args[2].val
+            call = Expr(:call, arrexpr.args[3:end]...)
+
+            # TODO: multiple outputs?
+            println(instance.intrinsic)
+            output = arrexpr.args[instance.args_offset + instance.intrinsic.outputs[1]]
+            println(output)
+            return quote
+                $call
+                $output
+                end, input_map
         end
-        =#
 
         return convert(Expr, arrexpr), input_map
-    elseif arrexpr isa Input
+    elseif arrexpr isa Input || arrexpr isa Output
         if (isprimitivetype(typeof(arrexpr.val)) || arrexpr.val isa Core.GlobalRef) 
             return arrexpr.val, input_map
         else

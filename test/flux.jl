@@ -50,7 +50,6 @@ args = [xs]
 argtype = Tuple{typeof.(args)...}
 @eval f_opt(xs) = $(compile(f, argtype, [:xs], eltype=CuArray, extra_rules=rules))
 
-
 println("testing layer_opt")
 println(isapprox(Array(f(xs)), Array(f_opt(xs)), rtol=1.0, nans=true))
 

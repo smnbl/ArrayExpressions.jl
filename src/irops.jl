@@ -8,7 +8,7 @@ using Core: SSAValue
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 #       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
-function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true, intr_outputs=Dict{Any, Vector{IntrinsicInstance}}())
+function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true, intr_outputs=Dict{Any, Vector{IntrinsicInstance}}(), intrinsic=nothing)
     inst = ir.stmts[loc.id][:inst]
     type = CC.widenconst(ir.stmts[loc.id][:type])
 
@@ -35,29 +35,37 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
         return intr_outputs[arg][last]
     end
 
+    if intrinsic !== nothing
+        args = getargs(ir, intrinsic)
+        inst = Expr(:intrinsic, intrinsic, args...)
+    end
+
     if inst isa Expr
         args_op = []
 
-        # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
 
         for (idx, arg) in enumerate(inst.args)
+            # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
+
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             arg_type = CC.widenconst(CC.argextype(arg, ir))
 
             if arg isa SSAValue
                 if crossing_intrinsic(arg)
                     last = last_intrinsic(arg)
-                    println(last)
-                    # TODO: handle intrinsic
+
+                    visited, subtree = _extract_slice!(ir, SSAValue(last.location), visited=visited, intr_outputs=intr_outputs, intrinsic=last)
                     
-                    push!(args_op, Input(arg, arg_type))
+                    push!(args_op, subtree)
                 else
                     # TODO: stop at functions with side effects?
                     # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
                     visited, arexpr = _extract_slice!(ir, arg, visited=visited, intr_outputs=intr_outputs)
                     push!(args_op, arexpr)
                 end
+            elseif arg isa Output
+                push!(args_op, Output(arg.val, arg_type))
             else
                 push!(args_op, Input(arg, arg_type))
             end
@@ -66,19 +74,21 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
         return visited, ArrayExpr(inst.head, [args_op...], type)
 
     elseif inst isa SSAValue
+        push!(visited, loc.id)
+
         if crossing_intrinsic(inst)
             last = last_intrinsic(inst)
-            println(last)
-            # TODO: handle intrinsic
-
-            return visited, Input(inst, type)
+            visited, subtree = _extract_slice!(ir, last.possible, visited=visited, intr_outputs=intr_outputs, intrinsic=last)
+            return visited, subtree
         end
+
         return _extract_slice!(ir, inst, visited=visited, intr_outputs=intr_outputs)
 
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
         return visited, Input(inst, type)
+
     else # PhiNodes, etc...
         return visited, Input(loc, type)
     end
@@ -114,101 +124,22 @@ function replace!(ir::IRCode, visited, first, call_expr, type, output_map)
             if old_idx != loc
                 idx = compact.ssa_rename[old_idx].id
                 compact.used_ssas[idx] -= 1
-                if compact.used_ssas[idx] == 0
+
+                println("$old_idx: used $(compact.used_ssas[idx])")
+                # TODO: this is broken
+                # intrinsics will have used_ssas < 0
+                if compact.used_ssas[idx] <= 0
                     CC.setindex!(compact.result[idx], nothing, :inst)
                 end
             end
-
         end
 
         ir = CC.finish(compact)
     end
 end
 
-export ArrOptimPass
-
-struct ArrOptimPass
-    element_type::Type
-    extra_rules::Vector{Metatheory.AbstractRule}
-    intrinsics::Vector{Intrinsic}
-    mod::Module
-
-    ArrOptimPass(eltype; mod=@__MODULE__, extra_rules=[], intrinsics=[]) = return new(eltype, extra_rules, intrinsics, mod)
-end
-
-# check if instruction matches one of the rules
-function inrules(inst, rules)
-    # TODO: support more besides call instructions
-    if !(CC.isexpr(inst, :call) || (CC.isexpr(inst, :invoke) && inst.args[2] isa GlobalRef))
-        return false
-    end
-
-    for rule in rules
-        if (CC.isexpr(inst, :call))
-            if rule.left.operation == inst.args[1]
-                return true
-            end
-        else
-            canonical = rule.left.operation
-            op = inst.args[2]
-            if canonical.mod == op.mod &&
-               compare(string(canonical.name), string(op.name))
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
-function inintrinsics(inst, intrinsics)
-    # TODO: support more besides call instructions
-    if !(CC.isexpr(inst, :call))
-        return nothing
-    end
-
-    for intrinsic in intrinsics
-        if (CC.isexpr(inst, :call))
-            op = inst.args[1]
-            if (op isa GlobalRef)
-                if intrinsic.operation == op
-                    return intrinsic
-                end
-            else
-                # TODO: is this right?
-                # might be a kwfunc
-                if op == Core.kwfunc(resolve(intrinsic.operation))
-                    return intrinsic
-                end
-            end
-        else
-            canonical = intrinsic.operation
-            op = inst.args[2]
-            if canonical.mod == op.mod &&
-               compare(string(canonical.name), string(op.name))
-                return intrinsic
-            end
-        end
-    end
-
-    return nothing
-
-end
-
-function compare(canonical_name::String, derived_name::String)
-    pred = x -> x == '#' || isnumeric(x)
-    return canonical_name == strip(pred, derived_name)
-end
-
 # Array optimizations pass
 function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
-    # check meta tag
-    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)
-    if (false && !perform_array_opt)
-        # do nothing
-        return ir
-    end
-
     stmts = ir.stmts
     visited = Int64[]
     exprs = ArrayIR[]
@@ -218,6 +149,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     correct_rettype(rettype) = rettype <: aro.element_type && rettype != Union{}
 
     intr_outputs = Dict{Any, Vector{IntrinsicInstance}}() # arg -> lines that update this arg (indirectly)
+    intrinsic_instances = []
 
     # Forward Pass
     for idx in 1:length(ir.stmts)
@@ -229,16 +161,17 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         end
 
         # fix intrinsics
-        intrinsic = inintrinsics(inst, aro.intrinsics)
-        if (intrinsic !== nothing)
+        instance = inintrinsics(inst, aro.intrinsics, idx)
+        if !isnothing(nothing)
             # check if kwfunc
             op = inst.args[1]
 
             # offset from where the arguments start
-            args_offset = if (op isa Function) 3 else 1 end
+            args_offset = instance.args_offset
 
-            for arg in intrinsic.outputs
-                push!(get!(intr_outputs, inst.args[arg + args_offset], []), IntrinsicInstance(idx, intrinsic))
+            for arg in instance.intrinsic.outputs
+                push!(get!(intr_outputs, inst.args[arg + args_offset], []), instance)
+                push!(intrinsic_instances, instance)
             end
             println(intr_outputs)
         end
@@ -262,35 +195,52 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
         rule = inrules(inst, aro.extra_rules)
-        intrinsic = inintrinsics(inst, aro.intrinsics)
-
-        #correct_type = correct_rettype(rettype)
+        intrinsic = inintrinsics(inst, aro.intrinsics, idx)
 
         # TODO: bench hom much speedup due to inrules!
         rule || intrinsic !== nothing || continue 
         # (correct_type #=&& inrules(inst, aro.extra_rules)=# || iscopyto_array) || continue
 
         if (rule)
-            # TODO: optimize whole ir body iteratively
+           # TODO: optimize whole ir body iteratively
             # extract & optimize array expression that returns
             # TODO: work with basic blocks and CFG?
             visited, arexpr = _extract_slice!(ir, loc, visited=visited, intr_outputs=intr_outputs)
 
+            # todo: isn't this last?
             if first == nothing
                 first = CC.OldSSAValue(idx)
             end
 
             push!(exprs, arexpr)
+
+            break
         else
+            # TODO: start at intrinsics
             # TODO: idea to handle intrinsics:
             # wrap in sth like (virtually?): f(outputs, inputs) = { intrinsic(outputs, inputs); return outputs }
             # ? requires forward pass
 
             # if intrinsic:
 
-            println(ir)
             println("INTRINSIC:")
-            println(inst.args[2])
+            println(inst.args[1])
+
+            op = inst.args[intrinsic.intrinsic.operation_pos + intrinsic.args_offset - 1]
+            op_type = CC.widenconst(CC.argextype(op, ir))
+            println("operation: $(op_type)")
+
+            visited, tree = _extract_slice!(ir, loc, visited=visited, intr_outputs=intr_outputs, intrinsic=intrinsic)
+
+            # todo: isn't this last?
+            if first == nothing
+                first = CC.OldSSAValue(idx)
+            end
+
+            push!(exprs, tree)
+
+            # stop at first tree; as rest is broken
+            break
         end
     end
 
@@ -321,7 +271,14 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     println("compiling opaque closure:")
     println(expr)
 
-    oc = Core.eval(mod, Expr(:opaque_closure, expr))
+    # note: world age changes here
+    # TODO: investigate if problem, read world age paper
+    
+    # outlines in separate function,
+    # TODO: might switch to opaque closure (but has world age problems)
+    # idea: run this in an older world age, decompose the eval so that it does not update the world age counter?
+    # oc = Core.eval(mod, Expr(:opaque_closure, expr))
+    oc = Core.eval(mod, expr)
 
     arguments = Array{Any}(undef, length(input_map))
 
@@ -333,12 +290,16 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         arguments[idx] = val
     end
 
+    # TODO: should we use invokelatest here?
+    # TODO: try ... catch ... pattern for faster call invocations
+    # doesn't seem to work with opaque closures :(
     call_expr =  Expr(:call, oc, arguments...)
 
-    # TODO: add output map
-    ir = replace!(ir, visited, first, call_expr, tuple_type, nothing)
+    println(visited)
 
-    println(ir)
+    # TODO: add output map
+    # Have to set output type to (Any, ...), otherwise segmentation faults -> TODO: investigate, seems to be the case if there is a mismatch in the return types
+    ir = replace!(ir, visited, first, call_expr, NTuple{length(exprs), Any}, nothing)
 
     return ir
 end

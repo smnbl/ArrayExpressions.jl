@@ -50,7 +50,9 @@ const gemm_properties = @array_theory A B C op d epi begin
     # merge operations in prologue / epilogue
     # TODO: how to merge with prefix? prologue?
     # TODO: make sure epilogue is scalar
-    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, ArrayExpr(:call, [:EpiL, op, d])) where istype(d, Number)
+    #broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, ArrayExpr(:call, [:EpiL, op, d])) where istype(d, Number)
+    #broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, ArrayExpr(:call, [:EpiR, op, d]))  where istype(d, Number)
+    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d]))) where istype(d, Number)
     broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, ArrayExpr(:call, [:EpiR, op, d]))  where istype(d, Number)
 
     # TODO: add support for these type of rules
@@ -59,9 +61,9 @@ const gemm_properties = @array_theory A B C op d epi begin
 
     # fuse operations
     broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
-    #broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
-    #broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
-    #broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
+    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
+    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
+    broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
 
     # TODO: add support for these type of rules
     # C = GemmWithEpilogue(A, B, C, epi) => GemmWithEpilogue!(A, B, C, epi)
@@ -72,7 +74,11 @@ end
 
 # TODO:
 # what determines how deep an intrinsic goes?
-const gpu_intrinsics = [Intrinsic(GlobalRef(CUDA.CUBLAS, :gemm_dispatch!), [1], [2,3]),
-                        Intrinsic(GlobalRef(Main, :Gemm!), [3], [1,2])]
+const gpu_intrinsics = [Intrinsic(GlobalRef(Main, :*), 1, [1]),
+                        Intrinsic(GlobalRef(CUDA.CUBLAS, :gemm_dispatch!), 1, #=[CuArray, CuArray, CuArray]=# [1]),
+                        Intrinsic(GlobalRef(Main, :Gemm!), 1, [3]),
+                        Intrinsic(GlobalRef(GPUArrays, :gpu_call), 2, [2])]
 
 # TODO: GemmKernels.matmul intrinsic
+
+# @checked function cublasGemmEx(handle, transa, transb, m, n, k, alpha, A, Atype, lda, B,

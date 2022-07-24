@@ -14,12 +14,14 @@ const (M, N, K) = ntuple(i -> 512, 3)
 
 
 # for a fair comparison
+#=
 @inline function (Base.:*)(A::CuMatrix, B::CuMatrix)
     C = CuArray{Float32}(undef, (size(A, 1), size(B, 2)))
     # C = 1.0 * A*B + 0.0 * C
     Gemm!(A, B, C, alpha=1.0, beta=0.0)
     return C
 end
+=#
 
 @inline function Gemm(A, B, C; alpha=1.0, beta=1.0)
     # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
@@ -100,24 +102,32 @@ end
 eltype = CuArray
 
 # intergration tests
-gemmcompile(func, argtype, args) = compile(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics)
+gemmcompile(func, argtype, args) = compile_expression(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics)
 
-@array_opt function gemm(A, B, C)
-    return A * B + C
+function subcall(A, B)
+    return subsubcall(A, B)
+end
+
+function subsubcall(A, B)
+    return A + B
+end
+
+function gemm(A, B, C)
+    return subcall(A * B, C)
 end
 
 relu(x) = max(0.0, x)
 
-@array_opt function gemm_fusion_scalar_add(A, B, C)
+function gemm_fusion_scalar_add(A, B, C)
     T = A * B
     T += C
     # NOTE: how make this more flexible that other floating types are supported?
     T = T .+ Float32(0.2)
-    #return relu.(T)
+    T = relu.(T)
     return T
 end
 
-@array_opt function gemm_multi(A, B, C)
+function gemm_multi(A, B, C)
     X = A * B + C
     Y = A * B + C
     return X, Y
@@ -151,27 +161,26 @@ println("epi: after")
     end
 end
 
-#=
 # w scalar_add
 @eval gemm_fusion_scalar_add_opt(A, B, C) = $(gemmcompile(gemm_fusion_scalar_add, argtype, [:A, :B, :C]))
 @test isapprox(Array(gemm_fusion_scalar_add_opt(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0, nans=true)
 
-println("benchmarking...")
+iterations = 10000
 
+println("benchmarking...")
 println("epi: before:")
 @time CUDA.@sync begin
-    for _ in 1:1000
+    for _ in 1:iterations
         copyto!(C, gemm_fusion_scalar_add(A, B, C))
     end
 end
 
 println("epi: after")
 @time CUDA.@sync begin
-    for _ in 1:1000
+    for _ in 1:iterations
         copyto!(C, gemm_fusion_scalar_add_opt(A, B, C))
     end
 end
-=#
 
 # generated multi
 # @eval generated_multi(A, B, C) = $(compile(gemm_multi, argtype, [:A, :B, :C]))

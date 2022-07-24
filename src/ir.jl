@@ -8,6 +8,12 @@ const TI = TermInterface
 
 const InputTypes = Any
 
+struct Output
+    val::Any
+    type::Type
+    Output(val::Any) = new(val, Any)
+    Output(val::Any, type::Type) = new(val, type)
+end
 
 struct Input
     val::Any
