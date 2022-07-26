@@ -102,7 +102,14 @@ end
 eltype = CuArray
 
 # intergration tests
-gemmcompile(func, argtype, args) = compile_expression(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics)
+
+macro gemmcompile(target, func, args, argtype)
+    println(args)
+    quote
+        ci = compile_expression($func, $argtype, $args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics)
+        @generated $(esc(target))($(eval(args)...)) = ci
+    end
+end
 
 function subcall(A, B)
     return subsubcall(A, B)
@@ -113,10 +120,10 @@ function subsubcall(A, B)
 end
 
 function gemm(A, B, C)
-    return subcall(A * B, C)
+    subcall(A, B)
 end
 
-relu(x) = max(0.0, x)
+relu(x) = max(Float32(0.0), x)
 
 function gemm_fusion_scalar_add(A, B, C)
     T = A * B
@@ -139,14 +146,14 @@ C = CuArray(rand(Float32, (M, N)))
 
 cache = ArrayAbstractions.CodeCache()
 
-argtype = Tuple{Core.typeof.([A, B, C])...}
+argtype = Core.typeof.([A, B, C])
 
 # demo function
-@eval gemm_opt(A, B, C) = $(gemmcompile(gemm, argtype, [:A, :B, :C]))
+@gemmcompile gemm_opt gemm [:A, :B, :C] argtype
 # warmup & check
 @test isapprox(Array(gemm(A, B, C)), Array(gemm_opt(A, B, C)), rtol=1.0, nans=true)
 
-println("optimized, benching...")
+println("benching gemm")
 println("epi: before:")
 @time CUDA.@sync begin
     for _ in 1:10000
@@ -162,12 +169,14 @@ println("epi: after")
 end
 
 # w scalar_add
-@eval gemm_fusion_scalar_add_opt(A, B, C) = $(gemmcompile(gemm_fusion_scalar_add, argtype, [:A, :B, :C]))
+
+@gemmcompile gemm_fusion_scalar_add_opt gemm_fusion_scalar_add [:A, :B, :C] argtype
 @test isapprox(Array(gemm_fusion_scalar_add_opt(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0, nans=true)
+
 
 iterations = 10000
 
-println("benchmarking...")
+println("benchmarking fusion_scalar_add")
 println("epi: before:")
 @time CUDA.@sync begin
     for _ in 1:iterations

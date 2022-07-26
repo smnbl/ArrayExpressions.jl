@@ -7,17 +7,17 @@ include("gpu/gpu_rules.jl")
 
 const bias = cu(randn(Float32, 7))
 
-xs = cu(rand(Float32, 1000, 1000, 3, 50))
+xs = rand(Float32, 1000, 1000, 3, 50)
 
-const layer = fmap(cu, Conv((5,5), 3 => 7, relu; bias = bias))
+const layer = Conv((5,5), 3 => 7, relu; bias = bias)
 
-const chain = fmap(cu, Chain(
+const chain = Chain(
     Conv((5, 5), 3 =>6, relu),
-    Dropout(0.4),
+    Dropout(Float32(0.4)),
     MaxPool((2, 2)),
     Conv((5, 5), 6=>16, relu),
     MaxPool((2, 2)),
-          ))
+          )
 
 # investigate what goes wrong, and why needed to wrap inside other function
 function f(xs)
@@ -40,15 +40,18 @@ function conv_bias_act(x, w, cdims, b, a)
 end
 
 flux_conv_fusing_rules = @array_theory begin
-    # TODO: make f matching on Main.:+ possible
-    Main.broadcast(~a, Main.broadcast(~f, Flux.conv(~x, ~w, ~cdims), ~b)) => replace(~f, ~a, ~x, ~w, ~cdims, ~b) where istype(~f, typeof(Flux.:+))
+    # TODO fix this with current graphs (Flux.conv seeems different)
+    Main.broadcast(~a, Main.broadcast(~f, Flux.conv(~x, ~w, ~cdims), ~b)) => replace(~f, ~a, ~x, ~w, ~cdims, ~b) where istype(~f, typeof(Flux.:+))k
 end
 
 const rules = flux_conv_fusing_rules ∪ AA.canonicalize_broadcasting ∪ gemm_properties
 
 args = [xs]
 argtype = Tuple{typeof.(args)...}
-@eval f_opt(xs) = $(compile(f, argtype, [:xs], eltype=CuArray, extra_rules=rules))
+
+# @eval f_opt(xs) = compile_with_gpucompiler(f, argtype, [:xs], eltype=CuArray, extra_rules=rules)
+ci = compile_expression(f, argtype, [:xs], eltype=CuArray, extra_rules=rules)
+@generated f_opt(xs) = ci
 
 println("testing layer_opt")
 println(isapprox(Array(f(xs)), Array(f_opt(xs)), rtol=1.0, nans=true))

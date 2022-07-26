@@ -108,15 +108,17 @@ function replace!(ir::IRCode, visited, first, call_expr, type, output_map)
 
         next = CC.iterate(compact)
         while true
-            ((old_idx, idx), stmt) = next[1]
+            (((idx, old_res_idx), stmt), (next_idx, next_bb)) = next
 
-            if (old_idx == loc)
+            println("next_idx: $next_idx, next_bb: $next_bb")
+
+            if (old_res_idx == loc)
                 expr = Expr(:call, GlobalRef(Base, :getfield), ssa_tuple, 1)
                 CC.fixup_node(compact, expr)
-                CC.setindex!(compact.result[idx], expr, :inst)
+                CC.setindex!(compact.result[old_res_idx], expr, :inst)
             end
 
-            next = CC.iterate(compact, next[2])
+            next = CC.iterate(compact, (next_idx, next_bb))
             next != nothing || break
         end
 
@@ -163,9 +165,6 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # fix intrinsics
         instance = inintrinsics(inst, aro.intrinsics, idx)
         if !isnothing(nothing)
-            # check if kwfunc
-            op = inst.args[1]
-
             # offset from where the arguments start
             args_offset = instance.args_offset
 

@@ -38,9 +38,11 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
     opt_params::OptimizationParams
 
     aro::ArrOptimPass
+    ci_cache::Any
 
     function ArrayInterpreter(aro::ArrOptimPass, world::UInt = get_world_counter();
-                              inline = true
+                              inline = true,
+                              ci_cache = CodeCache()
                                )
         # Sometimes the caller is lazy and passes typemax(UInt).
         # we cap it to the current world age
@@ -55,7 +57,9 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
         optim_params = NamedTuple()
 
         if inline
-            optim_params = (optim_params..., inline_cost_threshold=typemax(Int))
+            # def = 100
+            # thersh = typemax(Int)
+            optim_params = (optim_params..., inline_cost_threshold=1000)
         end
 
         # for internal passes -> need for custom interpreter
@@ -72,7 +76,8 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
             # parameters for inference and optimization
             inf_params,
             opt_params,
-            aro
+            aro,
+            ci_cache
         )
     end
 end
@@ -82,7 +87,7 @@ CC.InferenceParams(ni::ArrayInterpreter) = ni.inf_params
 CC.OptimizationParams(ni::ArrayInterpreter) = ni.opt_params
 CC.get_world_counter(ni::ArrayInterpreter) = ni.world
 CC.get_inference_cache(ni::ArrayInterpreter) = ni.cache
-CC.code_cache(ni::ArrayInterpreter) = WorldView(CC.GLOBAL_CI_CACHE, CC.get_world_counter(ni))
+CC.code_cache(ni::ArrayInterpreter) = WorldView(ni.ci_cache, CC.get_world_counter(ni))
 
 CC.lock_mi_inference(::ArrayInterpreter, mi::MethodInstance) = (mi.inInference = true; nothing)
 
@@ -102,6 +107,10 @@ function run_passes(ci::CodeInfo, sv::OptimizationState, caller::InferenceResult
 
     #TODO: time this
     ir = custom_ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds, aro)
+
+    # perform optimization
+    ir = aro(ir, ci.parent.def.module)
+    
     # verify_ir(ir)
     ir = CC.compact!(ir)
     ir = CC.sroa_pass!(ir)

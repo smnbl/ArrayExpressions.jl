@@ -1,5 +1,8 @@
 using GPUCompiler
-using GPUCompiler: cached_compilation, AbstractCompilerParams, GPUInterpreter
+using GPUCompiler:
+    cached_compilation,
+    AbstractCompilerParams,
+    GPUInterpreter
 using ArrayAbstractions
 using LLVM
 
@@ -22,29 +25,64 @@ end
 struct TestCompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
 
-function native_job_with_pass(@nospecialize(func), @nospecialize(types); extra_passes=[], end_pass=nothing, kernel::Bool=false, entry_abi=:specfunc, kwargs...)
-    source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-    target = NativeCompilerTarget(always_inline=true)
-    params = TestCompilerParams()
-    CompilerJob(target, source, params, entry_abi, extra_passes=extra_passes, end_pass=end_pass, always_inline=false), kwargs
+Base.@kwdef struct ArrayNativeCompilerTarget <: GPUCompiler.AbstractCompilerTarget
+    cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
+    features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
+    always_inline::Bool=false # will mark the job function as always inline
+    jlruntime::Bool=true # Use Julia runtime for throwing errors, instead of the GPUCompiler support
+    aro::ArrOptimPass = ArrOptimPass()
 end
 
+GPUCompiler.llvm_triple(::ArrayNativeCompilerTarget) = Sys.MACHINE
 
-function compile_with_gpucompiler(func, argtype, args; eltype=AbstractArray, extra_rules=[], intrinsics=[])
-    inter_pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
-    end_pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
+function GPUCompiler.llvm_machine(target::ArrayNativeCompilerTarget)
+    triple = GPUCompiler.llvm_triple(target)
+
+    t = GPUCompiler.Target(triple=triple)
+
+    tm = GPUCompiler.TargetMachine(t, triple, target.cpu, target.features)
+    GPUCompiler.asm_verbosity!(tm, true)
+
+    return tm
+end
+
+function process_entry!(job::CompilerJob{ArrayNativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+    if job.target.always_inline
+        push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
+    end
+    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+end
+
+## job
+runtime_slug(job::CompilerJob{ArrayNativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
+uses_julia_runtime(job::CompilerJob{ArrayNativeCompilerTarget}) = job.target.jlruntime
+
+function native_job_with_pass(@nospecialize(func), @nospecialize(types), aro::ArrOptimPass; kernel::Bool=false, entry_abi=:specfunc, kwargs...)
+    source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
+    target = ArrayNativeCompilerTarget(aro = aro, always_inline=true)
+    params = TestCompilerParams()
 
     function end_pass(code_info::CC.CodeInfo, mi::CC.MethodInstance)
         ir = CC.inflate_ir(code_info, mi)
-        ir = end_pass(ir, mi.def.module)
+        ir = aro(ir, mi.def.module)
 
         CC.replace_code_newstyle!(code_info, ir, Int64(mi.def.nargs))
 
         return code_info
     end
+    CompilerJob(target, source, params, entry_abi, end_pass=end_pass, always_inline=false), kwargs
+end
+
+
+GPUCompiler.get_interpreter(@nospecialize(job::CompilerJob{ArrayNativeCompilerTarget})) =
+    ArrayInterpreter(job.target.aro, job.source.world; ci_cache = GPUCompiler.ci_cache(job))
+
+function compile_with_gpucompiler(func, argtype, args; eltype=AbstractArray, extra_rules=[], intrinsics=[])
+    pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
 
     # don't run a pass in the loop
-    job, _ = native_job_with_pass(func, (argtype); extra_passes=[inter_pass], kernel=false)
+    job, _ = native_job_with_pass(func, (argtype), pass; kernel=false)
     mi, _ = GPUCompiler.emit_julia(job)
     println("emitting julia done...")
 
@@ -69,18 +107,12 @@ end
 
 # IDEA: stop inlining when coming across an 'intrinsic'
 function compile_expression(func, argtype, args; eltype=AbstractArray, extra_rules=[], intrinsics=[])
+    pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
+
     world_count = Base.get_world_counter()
-    aro = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
-
-    optim_params = NamedTuple()
-
-    inline = true
-    if inline
-        optim_params = (optim_params..., inline_cost_threshold=typemax(Int))
-    end
 
     # for internal passes -> need for custom interpreter
-    interpreter = ArrayInterpreter(aro)
+    interpreter = ArrayInterpreter(pass)
     code_info, ty = Base.code_typed(func, argtype, interp = interpreter)[1]
 
     # get method instance
@@ -93,20 +125,20 @@ function compile_expression(func, argtype, args; eltype=AbstractArray, extra_rul
                     (Any, Any, Any, UInt), meth, ti, env, world_count)
 
 
+    #println("performing opt pass...")
+    #ir = CC.inflate_ir(code_info, method_instance)
 
-    println("performing opt pass...")
-    ir = CC.inflate_ir(code_info, method_instance)
-
-    open("irdump","w") do f
-        print(f, ir)
-    end
+    #open("irdump","w") do f
+        #print(f, ir)
+    #end
 
     # perform custom inlining
-    ir = custom_ssa_inlining_pass!(ir, ir.linetable, sv.inlining, code_info.propagate_inbounds)
-    ir = end_pass(ir, method_instance.def.module)
+    # ir = pass(ir, method_instance.def.module)
 
-    println("replacing code newstyle")
-    CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
+    #println("replacing code newstyle")
+    #CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
+
+    println("done!")
 
     return code_info
 end
