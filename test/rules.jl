@@ -1,6 +1,25 @@
 using ArrayAbstractions: ArrayExpr, Input
+const AA = ArrayAbstractions
+using Metatheory
 using Metatheory: Chain
 
+# test inrules instruction matcher
+inst = Expr(:call, :test, :A, :B)
+inst2 = Expr(:call, :test2, :A, :B)
+inst3 = Expr(:call, :test, :A)
+inst4 = Expr(:call, :test, :A, :B, :C)
+
+rules = @theory A B C begin
+    test(A, B) == blabla(A, B)
+    test(A, B, C) == bla(A, B, C)
+end
+
+@test AA.inrules(inst, rules) == true
+@test AA.inrules(inst2, rules) == false
+@test AA.inrules(inst2, rules) == false
+@test AA.inrules(inst4, rules) == true
+
+# test array rules
 let l = @array_rule Main.println(11) --> 10
     e = Expr(:call, GlobalRef(Main, :println), 11)
     @test l(e) === 10

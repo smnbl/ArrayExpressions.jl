@@ -59,7 +59,7 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
         if inline
             # def = 100
             # thersh = typemax(Int)
-            optim_params = (optim_params..., inline_cost_threshold=1000)
+            optim_params = (optim_params..., inline_cost_threshold=10000)
         end
 
         # for internal passes -> need for custom interpreter
@@ -107,12 +107,12 @@ function run_passes(ci::CodeInfo, sv::OptimizationState, caller::InferenceResult
 
     #TODO: time this
     ir = custom_ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds, aro)
+    ir = CC.compact!(ir)
 
     # perform optimization
-    ir = aro(ir, ci.parent.def.module)
+    # ir = aro(ir, ci.parent.def.module)
     
     # verify_ir(ir)
-    ir = CC.compact!(ir)
     ir = CC.sroa_pass!(ir)
     ir = CC.adce_pass!(ir)
     ir = CC.type_lift_pass!(ir)

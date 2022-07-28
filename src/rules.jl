@@ -121,7 +121,7 @@ macro array_rule(args...)
     end
 end
 
-# based on Metatheory's @array_theory macro
+# based on Metatheory's @theory macro
 macro array_theory(args...)
     length(args) >= 1 || ArgumentError("@rule requires at least one argument")
     slots = args[1:(end - 1)]

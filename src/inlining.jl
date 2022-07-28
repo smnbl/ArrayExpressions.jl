@@ -1,4 +1,6 @@
 using Core.Compiler
+using Metatheory
+using Metatheory: AbstractRule
 
 const CC = Core.Compiler
 
@@ -7,31 +9,35 @@ using Core.Compiler:
     IRCode,
     isexpr,
     getindex
-# custom inlining pass
+# custom inlining passconst
+
+const EMPTY_DICT = Base.ImmutableDict{Int, Any}()
+
+function ismatch(inst, rule::AbstractRule)
+    left = rule.left
+    match = Metatheory.matcher(left)
+    
+    success(bindings, n) = n == 1 
+
+    try
+        is = !isnothing(match(success, (inst,), EMPTY_DICT))
+    catch err
+        throw("rewriterule match error")
+    end
+end
+
+# TODO: solve the add scalar problem!
+# somehow differentiate between the different types of broadcasts
+# OR only want to optimize the end result?
+
+# check if the head is in the rules
+function inrules(inst, rules)
+    return any(rule -> operation(inst) == operation(rule.left), rules)
+end
 
 # check if instruction matches one of the rules
-function inrules(inst, rules)
-    # TODO: support more besides call instructions
-    if !(CC.isexpr(inst, :call) || (CC.isexpr(inst, :invoke) && inst.args[2] isa GlobalRef))
-        return false
-    end
-
-    for rule in rules
-        if (CC.isexpr(inst, :call))
-            if rule.left.operation == inst.args[1]
-                return true
-            end
-        else
-            canonical = rule.left.operation
-            op = inst.args[2]
-            if canonical.mod == op.mod &&
-               compare(string(canonical.name), string(op.name))
-                return true
-            end
-        end
-    end
-
-    return false
+function inrulesexact(inst, rules)
+    return any(rule -> ismatch(inst, rule) , rules)
 end
 
 function inintrinsics(inst, intrinsics, idx)
@@ -84,13 +90,11 @@ function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
         # custom check if it is an intrinsic
         inst = ir.stmts[idx][:inst]
         if (isexpr(inst, :call))
-            if inrules(inst, aro.extra_rules)
-                println(inst)
+            if inrules(inst, (aro.extra_rules))
                 continue
             end
             instance = inintrinsics(inst, aro.intrinsics, idx)
             if !isnothing(instance)
-                println(instance)
                 continue
             end
         end

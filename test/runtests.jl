@@ -21,9 +21,8 @@ macro test_if(label, expr)
 end
 
 # Unit tests
-#@test_if "array_rules" include("array_rules.jl")
-# TODO: write irops / custom rules unittests
-#@test_if "irops" include("irops.jl")
+@test_if "rules" include("rules.jl")
+@test_if "injection" include("injection.jl")
 
 # Integration tests
 @test_if "gpu" include("gpu/gpu.jl")

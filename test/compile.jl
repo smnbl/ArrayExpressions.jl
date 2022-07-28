@@ -126,17 +126,19 @@ function compile_expression(func, argtype, args; eltype=AbstractArray, extra_rul
 
 
     #println("performing opt pass...")
-    #ir = CC.inflate_ir(code_info, method_instance)
+    ir = CC.inflate_ir(code_info, method_instance)
 
-    #open("irdump","w") do f
-        #print(f, ir)
-    #end
+    open("irdump","w") do f
+        print(f, code_info)
+    end
 
-    # perform custom inlining
-    # ir = pass(ir, method_instance.def.module)
+    println(code_info)
 
-    #println("replacing code newstyle")
-    #CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
+    println("performing the pass at the end!")
+    ir = pass(ir, method_instance.def.module)
+
+    println("replacing code newstyle")
+    CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
 
     println("done!")
 

@@ -75,9 +75,7 @@ end
 # TODO:
 # what determines how deep an intrinsic goes?
 const gpu_intrinsics = [Intrinsic(GlobalRef(Main, :*), 1, [1]),
-                        Intrinsic(GlobalRef(CUDA.CUBLAS, :gemm_dispatch!), 1, #=[CuArray, CuArray, CuArray]=# [1]),
-                        Intrinsic(GlobalRef(Main, :Gemm!), 1, [3]),
-                        Intrinsic(GlobalRef(GPUArrays, :gpu_call), 2, [2])]
+                        Intrinsic(GlobalRef(Main, :+), 1, [1])]
 
 # TODO: GemmKernels.matmul intrinsic
 

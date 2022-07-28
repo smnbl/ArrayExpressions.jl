@@ -111,26 +111,34 @@ macro gemmcompile(target, func, args, argtype)
     end
 end
 
-function subcall(A, B)
-    return subsubcall(A, B)
+function subcall(A, B, C)
+    return subsubcall(A, B) + C
 end
 
 function subsubcall(A, B)
-    return A + B
+    return A * B
 end
 
 function gemm(A, B, C)
-    subcall(A, B)
+    subcall(A, B, C)
 end
 
 relu(x) = max(Float32(0.0), x)
 
+function element_kernel(T)
+    T = T .+ Float32(0.2)
+    T = relu.(T)
+    T = T .* 3.0
+
+    return T
+end
+
+
 function gemm_fusion_scalar_add(A, B, C)
     T = A * B
     T += C
+    T = element_kernel(T)
     # NOTE: how make this more flexible that other floating types are supported?
-    T = T .+ Float32(0.2)
-    T = relu.(T)
     return T
 end
 
@@ -148,6 +156,7 @@ cache = ArrayAbstractions.CodeCache()
 
 argtype = Core.typeof.([A, B, C])
 
+#=
 # demo function
 @gemmcompile gemm_opt gemm [:A, :B, :C] argtype
 # warmup & check
@@ -168,6 +177,8 @@ println("epi: after")
     end
 end
 
+=#
+
 # w scalar_add
 
 @gemmcompile gemm_fusion_scalar_add_opt gemm_fusion_scalar_add [:A, :B, :C] argtype
@@ -178,6 +189,9 @@ iterations = 10000
 
 println("benchmarking fusion_scalar_add")
 println("epi: before:")
+
+CUDA.@sync gemm_fusion_scalar_add(A, B, C)
+
 @time CUDA.@sync begin
     for _ in 1:iterations
         copyto!(C, gemm_fusion_scalar_add(A, B, C))
@@ -185,6 +199,8 @@ println("epi: before:")
 end
 
 println("epi: after")
+CUDA.@sync gemm_fusion_scalar_add_opt(A, B, C)
+
 @time CUDA.@sync begin
     for _ in 1:iterations
         copyto!(C, gemm_fusion_scalar_add_opt(A, B, C))
