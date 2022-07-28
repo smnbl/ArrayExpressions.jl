@@ -29,7 +29,7 @@ Base.@kwdef struct ArrayNativeCompilerTarget <: GPUCompiler.AbstractCompilerTarg
     cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
     always_inline::Bool=false # will mark the job function as always inline
-    jlruntime::Bool=true # Use Julia runtime for throwing errors, instead of the GPUCompiler support
+    jlruntime::Bool=true# Use Julia runtime for throwing errors, instead of the GPUCompiler support
     aro::ArrOptimPass = ArrOptimPass()
 end
 
@@ -46,17 +46,17 @@ function GPUCompiler.llvm_machine(target::ArrayNativeCompilerTarget)
     return tm
 end
 
-function process_entry!(job::CompilerJob{ArrayNativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
+function GPUCompiler.process_entry!(job::CompilerJob{ArrayNativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    ctx = GPUCompiler.context(mod)
     if job.target.always_inline
         push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
     end
-    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+    invoke(GPUCompiler.process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 end
 
 ## job
-runtime_slug(job::CompilerJob{ArrayNativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
-uses_julia_runtime(job::CompilerJob{ArrayNativeCompilerTarget}) = job.target.jlruntime
+GPUCompiler.runtime_slug(job::CompilerJob{ArrayNativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
+GPUCompiler.uses_julia_runtime(job::CompilerJob{ArrayNativeCompilerTarget}) = job.target.jlruntime
 
 function native_job_with_pass(@nospecialize(func), @nospecialize(types), aro::ArrOptimPass; kernel::Bool=false, entry_abi=:specfunc, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
@@ -77,6 +77,125 @@ end
 
 GPUCompiler.get_interpreter(@nospecialize(job::CompilerJob{ArrayNativeCompilerTarget})) =
     ArrayInterpreter(job.target.aro, job.source.world; ci_cache = GPUCompiler.ci_cache(job))
+
+using GPUCompiler:
+@timeit_debug, compile_method_instance, functions, @compiler_assert, safe_name, ModulePassManager, linkage!, internalize!, always_inliner!, can_throw, add!, add_lowering_passes!, run!, process_module!, process_entry!, mangle_call
+
+# irgen with extra end pass
+function GPUCompiler.irgen(job::CompilerJob{ArrayNativeCompilerTarget}, method_instance::Core.MethodInstance;
+               ctx::Context)
+    mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
+
+    println("performing at end pass")
+    ci = compiled[method_instance].ci
+
+    src = if ci.inferred isa Vector{UInt8}
+        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                method_instance.def, C_NULL, ci.inferred)
+    else
+        ci.inferred
+    end
+
+    # TODO: compress back?
+    ci.inferred = job.target.aro(src, method_instance) 
+
+
+    if job.entry_abi === :specfunc
+        entry_fn = compiled[method_instance].specfunc
+    else
+        entry_fn = compiled[method_instance].func
+    end
+
+    # clean up incompatibilities
+    @timeit_debug to "clean-up" begin
+        for llvmf in functions(mod)
+            # only occurs in debug builds
+            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0; ctx))
+
+            if Sys.iswindows()
+                personality!(llvmf, nothing)
+            end
+
+            # remove the non-specialized jfptr functions
+            # TODO: Do we need to remove these?
+            if job.entry_abi === :specfunc
+                if startswith(LLVM.name(llvmf), "jfptr_")
+                    unsafe_delete!(mod, llvmf)
+                end
+            end
+        end
+
+        # remove the exception-handling personality function
+        if Sys.iswindows() && "__julia_personality" in functions(mod)
+            llvmf = functions(mod)["__julia_personality"]
+            @compiler_assert isempty(uses(llvmf)) job
+            unsafe_delete!(mod, llvmf)
+        end
+    end
+
+    # target-specific processing
+    process_module!(job, mod)
+    entry = functions(mod)[entry_fn]
+
+    # sanitize function names
+    # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
+    for f in functions(mod)
+        LLVM.isintrinsic(f) && continue
+        llvmfn = LLVM.name(f)
+        startswith(llvmfn, "julia.") && continue # Julia intrinsics
+        startswith(llvmfn, "llvm.") && continue # unofficial LLVM intrinsics
+        llvmfn′ = safe_name(llvmfn)
+        if llvmfn != llvmfn′
+            @assert !haskey(functions(mod), llvmfn′)
+            LLVM.name!(f, llvmfn′)
+        end
+    end
+
+    # rename and process the entry point
+    if job.source.name !== nothing
+        LLVM.name!(entry, safe_name(string("julia_", job.source.name)))
+    end
+    if job.source.kernel
+        LLVM.name!(entry, mangle_call(entry, job.source.tt))
+    end
+    entry = process_entry!(job, mod, entry)
+    if job.entry_abi === :specfunc
+        func = compiled[method_instance].func
+        specfunc = LLVM.name(entry)
+    else
+        func = LLVM.name(entry)
+        specfunc = compiled[method_instance].specfunc
+    end
+
+    compiled[method_instance] =
+        (; compiled[method_instance].ci, func, specfunc)
+
+    # minimal required optimization
+    @timeit_debug to "rewrite" ModulePassManager() do pm
+        global current_job
+        current_job = job
+
+        linkage!(entry, LLVM.API.LLVMExternalLinkage)
+
+        # internalize all functions, but keep exported global variables
+        exports = String[LLVM.name(entry)]
+        for gvar in globals(mod)
+            push!(exports, LLVM.name(gvar))
+        end
+        internalize!(pm, exports)
+
+        # inline llvmcall bodies
+        always_inliner!(pm)
+
+        can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+
+        add_lowering_passes!(job, pm)
+
+        run!(pm, mod)
+    end
+
+    return mod, compiled
+end
 
 function compile_with_gpucompiler(func, argtype, args; eltype=AbstractArray, extra_rules=[], intrinsics=[])
     pass = ArrOptimPass(eltype, extra_rules=extra_rules, intrinsics=intrinsics)
@@ -128,10 +247,6 @@ function compile_expression(func, argtype, args; eltype=AbstractArray, extra_rul
     #println("performing opt pass...")
     ir = CC.inflate_ir(code_info, method_instance)
 
-    open("irdump","w") do f
-        print(f, code_info)
-    end
-
     println(code_info)
 
     println("performing the pass at the end!")
@@ -140,9 +255,16 @@ function compile_expression(func, argtype, args; eltype=AbstractArray, extra_rul
     println("replacing code newstyle")
     CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
 
+    println(code_info)
+
     println("done!")
 
     return code_info
+end
+
+# compile and put inside an opaque closure
+function compile_oc()
+
 end
 
 #=

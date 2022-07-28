@@ -135,7 +135,7 @@ function TI.similarterm(x::ArrayExpr, head, args, symtype = nothing; metadata = 
 end
 
 function TI.similarterm(x::Type{ArrayExpr}, head, args, symtype = nothing; metadata = nothing, exprhead = :call)
-    expr_similarterm(head, args, isnothing(metadata) ? Union{} : metadata, Val{exprhead}())
+    expr_similarterm(head, args, isnothing(metadata) ? Any : metadata, Val{exprhead}())
 end
 
 expr_similarterm(head, args, type, ::Val{:call}) = ArrayExpr(:call, [head, args...], type)

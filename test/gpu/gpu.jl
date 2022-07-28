@@ -138,14 +138,20 @@ function gemm_fusion_scalar_add(A, B, C)
     T = A * B
     T += C
     T = element_kernel(T)
+
+
     # NOTE: how make this more flexible that other floating types are supported?
     return T
 end
 
 function gemm_multi(A, B, C)
-    X = A * B + C
-    Y = A * B + C
-    return X, Y
+    T = A * B
+    T += C
+    T = element_kernel(T)
+
+    X = adjoint(B) * adjoint(A) + adjoint(C)
+
+    return T, X
 end
 
 A = CuArray(rand(Float16, (M, K)))
@@ -156,7 +162,8 @@ cache = ArrayAbstractions.CodeCache()
 
 argtype = Core.typeof.([A, B, C])
 
-#=
+iterations = 10000
+
 # demo function
 @gemmcompile gemm_opt gemm [:A, :B, :C] argtype
 # warmup & check
@@ -177,15 +184,11 @@ println("epi: after")
     end
 end
 
-=#
 
 # w scalar_add
 
 @gemmcompile gemm_fusion_scalar_add_opt gemm_fusion_scalar_add [:A, :B, :C] argtype
 @test isapprox(Array(gemm_fusion_scalar_add_opt(A, B, C)), Array(gemm_fusion_scalar_add(A, B, C)), rtol=1.0, nans=true)
-
-
-iterations = 10000
 
 println("benchmarking fusion_scalar_add")
 println("epi: before:")
@@ -207,5 +210,26 @@ CUDA.@sync gemm_fusion_scalar_add_opt(A, B, C)
     end
 end
 
-# generated multi
-# @eval generated_multi(A, B, C) = $(compile(gemm_multi, argtype, [:A, :B, :C]))
+@gemmcompile gemm_multi_opt gemm_multi [:A, :B, :C] argtype
+
+a1, a2 = gemm_multi_opt(A, B, C)
+b1, b2 = gemm_multi(A, B, C)
+@test isapprox(Array(a1), Array(b1), rtol=1.0, nans=true)
+@test isapprox(Array(b2), Array(b2), rtol=1.0, nans=true)
+
+println("benchmarking multi")
+println("multi: before:")
+
+
+@time CUDA.@sync begin
+    for _ in 1:iterations
+        gemm_multi(A, B, C)
+    end
+end
+
+println("multi: after")
+@time CUDA.@sync begin
+    for _ in 1:iterations
+        gemm_multi_opt(A, B, C)
+    end
+end

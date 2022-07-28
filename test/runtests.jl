@@ -22,8 +22,11 @@ end
 
 # Unit tests
 @test_if "rules" include("rules.jl")
+#=
 @test_if "injection" include("injection.jl")
+=#
 
 # Integration tests
-@test_if "gpu" include("gpu/gpu.jl")
-# @test_if "flux" include("flux.jl")
+#@test_if "gpu" include("gpu/gpu.jl")
+#@test_if "flux" include("flux.jl")
+include("tensat.jl")

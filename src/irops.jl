@@ -5,40 +5,23 @@ using CUDA
 using Core: SSAValue
 using Core.Compiler: OldSSAValue, NewSSAValue
 
+
 # extract expression that resolves to #indx SSA value
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 #       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
-function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=true, intr_outputs=Dict{Any, Vector{IntrinsicInstance}}(), intrinsic=nothing)
+function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=0)
     inst = ir.stmts[loc.id][:inst]
     type = CC.widenconst(ir.stmts[loc.id][:type])
 
     # inference boundaries
-    pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter))
+    pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter) || Base.isexpr(inst, :foreigncall))
 
     # doesn't work that well atm
     # pure = ir.stmts[loc.id][:flag] & CC.IR_FLAG_EFFECT_FREE != 0
     # if statement is not pure we can not extract the instruction
     if (!pure)
-        return visited, Input(loc, type)
-    end
-
-    # TODO: check this!!
-    # check if we're not crossing an intrinsic which modifies 
-    crossing_intrinsic = arg -> haskey(intr_outputs, arg) && any(el -> el < loc.id, intr_outputs[arg])
-
-    # get last intrinsic that modified the arg
-    last_intrinsic = arg -> begin
-        last = findlast(el -> el < loc.id, intr_outputs[arg])
-        if (last === nothing)
-            return nothing
-        end
-        return intr_outputs[arg][last]
-    end
-
-    if intrinsic !== nothing
-        args = getargs(ir, intrinsic)
-        inst = Expr(:intrinsic, intrinsic, args...)
+        return visited, Input(loc, type), latest_ref
     end
 
     if inst isa Expr
@@ -53,45 +36,33 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], modify_ir=t
             arg_type = CC.widenconst(CC.argextype(arg, ir))
 
             if arg isa SSAValue
-                if crossing_intrinsic(arg)
-                    last = last_intrinsic(arg)
+                latest_ref = max(latest_ref, loc.id)
 
-                    visited, subtree = _extract_slice!(ir, SSAValue(last.location), visited=visited, intr_outputs=intr_outputs, intrinsic=last)
-                    
-                    push!(args_op, subtree)
-                else
-                    # TODO: stop at functions with side effects?
-                    # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
-                    visited, arexpr = _extract_slice!(ir, arg, visited=visited, intr_outputs=intr_outputs)
-                    push!(args_op, arexpr)
-                end
+                # TODO: stop at functions with side effects?
+                # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
+                visited, arexpr, latest_ref = _extract_slice!(ir, arg, visited=visited, latest_ref=latest_ref)
+
+                push!(args_op, arexpr)
             elseif arg isa Output
                 push!(args_op, Output(arg.val, arg_type))
             else
                 push!(args_op, Input(arg, arg_type))
             end
         end
-
-        return visited, ArrayExpr(inst.head, [args_op...], type)
-
+        return visited, ArrayExpr(inst.head, [args_op...], type), latest_ref
     elseif inst isa SSAValue
+        latest_ref = max(latest_ref, loc.id)
+
         push!(visited, loc.id)
-
-        if crossing_intrinsic(inst)
-            last = last_intrinsic(inst)
-            visited, subtree = _extract_slice!(ir, last.possible, visited=visited, intr_outputs=intr_outputs, intrinsic=last)
-            return visited, subtree
-        end
-
-        return _extract_slice!(ir, inst, visited=visited, intr_outputs=intr_outputs)
+        return _extract_slice!(ir, inst, visited=visited, latest_ref=latest_ref)
 
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
-        return visited, Input(inst, type)
+        return visited, Input(inst, type), latest_ref
 
     else # PhiNodes, etc...
-        return visited, Input(loc, type)
+        return visited, Input(loc, type), latest_ref
     end
 end
 
@@ -103,37 +74,42 @@ end
 function replace!(ir::IRCode, visited, todo_opt::Dict, output_map)
     # maps getfields locations to the tuple locations
     tuple_loc = Dict{OldSSAValue, Any}()
+    rename = Dict{Int, OldSSAValue}()
+
+    dont_delete = Int[]
 
     let compact = CC.IncrementalCompact(ir, true)
         # insert tuple calls right before the locations
-        for (loc, (call_expr, type)) in todo_opt
+        for (loc, (call_expr, type, getfield_locs)) in todo_opt
             ssa_tuple = CC.insert_node!(compact, SSAValue(loc.id), CC.non_effect_free(CC.NewInstruction(call_expr, type)))
             tuple_loc[loc] = ssa_tuple
+
+            for (field_index, getfield_ssa) in enumerate(getfield_locs)
+                expr = Expr(:call, GlobalRef(Base, :getfield), ssa_tuple, field_index)
+                new_ssa = CC.insert_node!(compact, ssa_tuple, CC.non_effect_free(CC.NewInstruction(expr, Any)), true)
+                rename[getfield_ssa.id] = new_ssa
+                CC.setindex!(compact, new_ssa, getfield_ssa.id)
+                push!(dont_delete, getfield_ssa.id)
+            end
         end
 
         next = CC.iterate(compact)
         while true
             (((idx, new_idx), stmt), (next_idx, next_bb)) = next
-
-            # why not before iterating? need to do this in-the-loop for correct fixup_node
-            # HACK: when we end up at the to-be replaced position make sure that the current instruction is the new getfield instruction
-            # potentially wrong needs thorough check
-            if (OldSSAValue(idx) ∈ keys(todo_opt))
-                # TODO: fix multiple outputs
-                expr = Expr(:call, GlobalRef(Base, :getfield), tuple_loc[OldSSAValue(idx)], 1)
-                CC.fixup_node(compact, expr)
-                # set instruction at old_res_idx position
-                CC.setindex!(compact.result[new_idx], expr, :inst)
-            end
-
             next = CC.iterate(compact, (next_idx, next_bb))
             next != nothing || break
         end
 
+        # can remove all the old instructions as they are now covered by the inserted expression
         for old_idx in visited
-            if OldSSAValue(old_idx) ∉ keys(todo_opt)
-                idx = compact.ssa_rename[old_idx].id
+            old_idx ∉ dont_delete || continue
+
+            idx = compact.ssa_rename[old_idx].id
+
+            # TODO: check this
+            if (idx < length(compact.used_ssas))
                 compact.used_ssas[idx] -= 1
+            
 
                 # println("$old_idx: used $(compact.used_ssas[idx])")
                 # TODO: this is broken
@@ -148,6 +124,8 @@ function replace!(ir::IRCode, visited, todo_opt::Dict, output_map)
     end
 end
 
+# TODO: create structs for the custom types, tuples and pairs can get a bit smelly
+
 # Array optimizations pass
 function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     stmts = ir.stmts
@@ -157,9 +135,6 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     correct_rettype(rettype) = rettype <: aro.element_type && rettype != Union{}
 
-    intr_outputs = Dict{Any, Vector{IntrinsicInstance}}() # arg -> lines that update this arg (indirectly)
-    intrinsic_instances = []
-
     for idx in 1:length(ir.stmts)
         # lower invokes to calls
         # TODO: move this to custom inlining
@@ -168,34 +143,24 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
             ir.stmts.inst[idx] = Expr(:call, inst.args[2:end]...)
             inst = ir.stmts.inst[idx]
         end
-
-        #=
-        # fix intrinsics
-        instance = inintrinsics(inst, aro.intrinsics, idx)
-        if !isnothing(nothing)
-            # offset from where the arguments start
-            args_offset = instance.args_offset
-
-            for arg in instance.intrinsic.outputs
-                push!(get!(intr_outputs, inst.args[arg + args_offset], []), instance)
-                push!(intrinsic_instances, instance)
-            end
-            println(intr_outputs)
-        end
-        =#
     end
 
 
     # loc of insertion, expr tree to optimize
-    todo = Pair{OldSSAValue,Vector{ArrayIR}}[]
+    todo = Pair{OldSSAValue, Dict{OldSSAValue, ArrayIR}}[]
     current_bb = CC.block_for_inst(ir.cfg, length(stmts))
-    exprs = ArrayIR[]
+
+    # loc start of expr => extracted expression
+    exprs = Dict{OldSSAValue, ArrayIR}()
     insert_loc = nothing
+
+    # latest referenced SSAValue
+    latest_ref = 0
 
     # 1. collect expressions
     for idx in length(stmts):-1:1
-        # switched to a new basic block
-        if (current_bb != CC.block_for_inst(ir.cfg, idx))
+        # switched to a new expression when hitting a basic block / crossing the latest ref
+        if (current_bb != CC.block_for_inst(ir.cfg, idx) || idx == latest_ref)
             if !isempty(exprs)
                 if isnothing(insert_loc)
                     throw("insert loc should be set!") 
@@ -203,9 +168,10 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
                 push!(todo, Pair(insert_loc, exprs))
             end
 
-            exprs = ArrayIR[]
+            exprs = Dict{OldSSAValue, ArrayIR}()
             insert_loc = nothing
             current_bb = CC.block_for_inst(ir.cfg, idx)
+            latest_ref = 0
         end
 
         inst = stmts.inst[idx]
@@ -221,21 +187,22 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # TODO: bench hom much speedup due to inrules!
         rule || continue 
 
-        # check if correct return type
-        rettype = CC.widenconst(stmts[idx][:type])
-        correct_rettype(rettype) || continue
+        # check if correct return type -> does not work when working with tuples!
+        # rettype = CC.widenconst(stmts[idx][:type])
+        # correct_rettype(rettype) || continue
 
         # TODO: optimize whole ir body iteratively
         # extract & optimize array expression that returns
         # TODO: work with basic blocks and CFG?
-        visited, arexpr = _extract_slice!(ir, loc, visited=visited, intr_outputs=intr_outputs)
 
-        # todo: isn't this last?
+        visited, arexpr, latest_ref = _extract_slice!(ir, loc, visited=visited, latest_ref=latest_ref)
+
+        # always insert at the tuple at the location furthest down
         if isnothing(insert_loc)
             insert_loc = OldSSAValue(idx)
         end
 
-        push!(exprs, arexpr)
+        exprs[OldSSAValue(idx)] = arexpr
     end
     # push from last bb
     if(!isnothing(insert_loc))
@@ -248,10 +215,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         return ir
     end
 
-    println(ir)
-    println(todo)
-
-    todo_opt = Dict{OldSSAValue, Pair{Expr, Type}}()
+    todo_opt = Dict{OldSSAValue, Tuple{Expr, Type, Any}}()
 
     # TODO: do all in 1 iteration over the intsts (1 compacting iteration)
     for (loc, exprs) in todo
@@ -259,9 +223,9 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # wrap arexpr in output function
         # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
         # equivalent to expressions that only contain SSAValues inside its arguments
-        tuple_type = Tuple{map(x -> x.type, exprs)...}
-        tuple = ArrayExpr(:tuple, exprs, tuple_type)
-        output = ArrayExpr(:output, [tuple], tuple.type)
+        tuple_type = Tuple{map(x -> x.type, values(exprs))...}
+        tuple_expr = ArrayExpr(:tuple, collect(values(exprs)), tuple_type)
+        output = ArrayExpr(:output, [tuple_expr], tuple_expr.type)
         #println(output)
         #println(">>>")
 
@@ -281,8 +245,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # 4. insert optimized expression back
         expr, input_map = codegen_expr!(simplified.args[1], length(ir.argtypes))
 
-
-        println("compiling opaque closure:")
+        println("compiling expression:")
         println(expr)
 
         # note: world age changes here
@@ -309,9 +272,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # doesn't seem to work with opaque closures :(
         call_expr =  Expr(:call, oc, arguments...)
 
-        # TODO: optimize
-        tuple_type = NTuple{length(exprs), Any}
-        push!(todo_opt, Pair(loc, Pair(call_expr, NTuple)))
+        push!(todo_opt, Pair(loc, (call_expr, tuple_type, collect(keys(exprs)))))
     end
 
     # TODO: add output map
@@ -320,3 +281,14 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     return ir
 end
+
+function (aro::ArrOptimPass)(code_info::CodeInfo, method_instance::MethodInstance)
+    ir = CC.inflate_ir(code_info, method_instance)
+    println(ir)
+
+    ir = aro(ir, method_instance.def.module)
+
+
+    println("replacing code newstyle")
+    CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
+ end

@@ -21,15 +21,16 @@ function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
     op = operation(ex)
     args = arguments(ex)
 
-    if istree(op)
-        op = makepattern(op, pvars, slots, mod)
-    elseif op isa Symbol
-        # TODO: investigate what to supply as mod ?
-        op = QuoteNode(GlobalRef(mod, op))
-    end
     #throw(Meta.ParseError("Unsupported pattern syntax $ex"))
     
     if head === :call
+        if istree(op)
+            op = makepattern(op, pvars, slots, mod)
+        elseif op isa Symbol
+            # TODO: investigate what to supply as mod ?
+            op = QuoteNode(GlobalRef(mod, op))
+        end
+
         if operation(ex) === :(~) # is a variable or segment
             if args[1] isa Expr && operation(args[1]) == :(~)
                 # matches ~~x::predicate or ~~x::predicate...
@@ -213,14 +214,21 @@ function EGraphs.join(an::Type{MetadataAnalysis}, a, b)
 end
 
 function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
-    if operation(n) == GlobalRef(Main, :GemmWithEpilogue)
+    op = operation(n)
+    if op isa Input
+        op = op.val
+    end
+
+    if op == GlobalRef(Main, :GemmWithEpilogue)
         cost = 1
-    elseif operation(n) == GlobalRef(Main, :Gemm)
+    elseif op == GlobalRef(Main, :Gemm)
         cost = 10
-    elseif !(exprhead(n) == :call || exprhead(n) == :invoke) || operation(n) == :app || operation(n) == :Lambda
+    elseif op == GlobalRef(Main, :matmul)
+        cost = 10000
+    elseif op == :tuple
         cost = 0
     else
-        cost = 1000
+        cost = 100
     end
 
     for id in arguments(n)
@@ -230,10 +238,14 @@ function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
         cost += last(getdata(eclass, an))
     end
 
+    # interesting illustration:
+    println(n)
+    println(cost)
+
     return cost
 end
 
-cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 0
+cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 1
 
 const theory = addition_properties ∪ multiplication_properties ∪ addition_properties
 

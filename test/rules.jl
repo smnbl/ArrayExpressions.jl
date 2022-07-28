@@ -57,3 +57,16 @@ end
 
 # global ref resolver
 @test eval(ArrayAbstractions.resolveref(:(Base.Broadcast.broadcast), Main)) == Base.Broadcast.broadcast
+
+# multi-rewrite rules
+let multi = @array_rule (print(~A), print(~B)) --> print((~A, ~B))
+    e = :((print(:A), print(:B)))
+    e = ArrayExpr(:tuple, [ArrayExpr(:call, [GlobalRef(Main, :print), :A]), ArrayExpr(:call, [GlobalRef(Main, :print), :B])])
+    @test multi(e) == ArrayExpr(:call, [GlobalRef(Main, :print), ArrayExpr(:tuple, [:A, :B])])
+end
+
+
+let multi = @array_rule (matmul(~x, ~w1), matmul(~x, ~w2)) --> split(matmul(~x, concat(~w1, ~w2)))
+    e = ArrayExpr(:tuple, [ArrayExpr(:call, [Input(GlobalRef(Main, :matmul)), :x, :w1]), ArrayExpr(:call, [Input(GlobalRef(Main, :matmul)), :x, :w2])])
+    @test multi(e) == ArrayExpr(:call, [GlobalRef(Main, :split), ArrayExpr(:call, [GlobalRef(Main, :matmul), :x, ArrayExpr(:call, [GlobalRef(Main, :concat), :w1, :w2])])])
+end
