@@ -1,5 +1,6 @@
 using ArrayAbstractions
 using ArrayAbstractions: App, Lambda, Intrinsic
+using Metatheory
 
 struct EpiL{F}
     func::F
