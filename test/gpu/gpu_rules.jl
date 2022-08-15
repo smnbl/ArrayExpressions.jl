@@ -114,7 +114,7 @@ function Gemm(A::EClass, B::EClass, C::EClass)
 end
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [GlobalRef(Main, :Gemm), A, B, C, alpha, beta], Union{})
+    return ArrayExpr(:call, [GlobalRef(Main, :Gemm), A, B, C, 1.0, 1.0], Union{})
 end
 
 function Gemm(A::EClass, B::EClass)
@@ -150,7 +150,7 @@ const gemm_properties = @array_theory A B C op d epi begin
     # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
 
     A * B => Gemm(A, B) where (istype(A, CuMatrix) && istype(B, CuMatrix))
-    Gemm(A, B) + C => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
+    A * B + C => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
 
     # merge operations in prologue / epilogue
     # TODO: how to merge with prefix? prologue?

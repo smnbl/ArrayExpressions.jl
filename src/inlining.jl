@@ -113,21 +113,6 @@ function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
     et = state.et
 
     for idx in 1:length(ir.stmts)
-        stmt = ir.stmts[idx][:inst]
-        open("inlining_log", "a") do io
-            println(io, "$stmt $(inrules(ir, stmt, aro.extra_rules) || inintrinsics(ir, stmt, gpu_intrinsics))")
-        end
-
-        # custom check if it is an intrinsic
-        if inrules(ir, stmt, (aro.extra_rules)) || inintrinsics(ir, stmt, gpu_intrinsics)
-            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] & ~CC.IR_FLAG_INLINE, :flag)
-            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] | CC.IR_FLAG_NOINLINE, :flag)
-            continue
-        else
-            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] & ~CC.IR_FLAG_NOINLINE, :flag)
-            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] | CC.IR_FLAG_INLINE, :flag)
-        end
-
         simpleres = CC.process_simple!(ir, idx, state, todo)
         simpleres === nothing && continue
         stmt, sig = simpleres
@@ -163,6 +148,10 @@ function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
             continue
         end
 
+        # custom check if it is an intrinsic
+        if inrules(ir, stmt, (aro.extra_rules)) || inintrinsics(ir, stmt, gpu_intrinsics)
+            continue
+        end
 
         # Handle invoke
         if sig.f === Core.invoke

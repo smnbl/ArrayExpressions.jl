@@ -193,8 +193,8 @@ function gettype(X::EClass)
     end
 end
 
-function istype(X::EClass, type)
-    ty = gettype(X)
+function istype(X::EClass, type::Type)
+    ty = CC.widenconst(gettype(X))
     return ty <: type
 end
 
@@ -228,8 +228,6 @@ function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
         cost = 1
     elseif op == GlobalRef(Main, :Gemm)
         cost = 10
-        # ignore last arguments (const)
-        args = args[1:3]
     elseif op == GlobalRef(Main, :matmul)
         cost = 1000
     elseif op == :tuple
@@ -249,8 +247,9 @@ function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
     end
 
     # interesting illustration:
-    println(n)
-    println(cost)
+    # TOOD: add debug levels?
+    #println(n)
+    #println(cost)
 
     return cost
 end

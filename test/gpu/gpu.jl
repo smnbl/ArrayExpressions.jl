@@ -31,7 +31,7 @@ function subcall(A, B, C)
 end
 
 function subsubcall(A, B)
-    @noinline return CUDA.:*(A, B)
+    return CUDA.:*(A, B)
 end
 
 function gemm(A, B, C)

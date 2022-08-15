@@ -17,10 +17,10 @@ end
 
 struct Input
     val::Any
-    type::Type
+    type::Union{Core.Const, Type}
     Input(val::GlobalRef) = new(val, typeof(resolve(val)))
     Input(val::Any) = new(val, Any)
-    Input(val::Any, type::Type) = new(val, type)
+    Input(val::Any, type) = new(val, type)
 end
 
 import Base.(==)
@@ -28,16 +28,16 @@ import Base.(==)
 (==)(other, input::Input) = input.val == other
 (==)(input::Input, input2::Input) = input.val == input2.val
 
-(==)(input::Input, other::Type) = input.type == other
-(==)(other::Type, input::Input) = input.type == other
+(==)(input::Input, other::Type) = CC.widenconst(input.type) == other
+(==)(other::Type, input::Input) = CC.widenconst(input.type) == other
 
-(==)(input::Input, other::GlobalRef) = input.type == typeof(resolve(other))
-(==)(other::GlobalRef, input::Input) = input.type == typeof(resolve(other))
+(==)(input::Input, other::GlobalRef) = CC.widenconst(input.type) == typeof(resolve(other))
+(==)(other::GlobalRef, input::Input) = CC.widenconst(input.type) == typeof(resolve(other))
 
 struct ArrayExpr
     head::Any
     args::Vector{Any}
-    type::Type
+    type::Union{Core.Const, Type}
     ArrayExpr(head, args) = new(head, args, Any)
     ArrayExpr(head, args, type) = new(head, args, type)
 end

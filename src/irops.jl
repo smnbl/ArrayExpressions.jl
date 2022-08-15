@@ -12,7 +12,8 @@ using Core.Compiler: OldSSAValue, NewSSAValue
 # visited: set of already visited notes
 function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=0)
     inst = ir.stmts[loc.id][:inst]
-    type = CC.widenconst(ir.stmts[loc.id][:type])
+    # might include const information
+    type = ir.stmts[loc.id][:type]
 
     # inference boundaries
     pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter) || Base.isexpr(inst, :foreigncall))
@@ -33,7 +34,8 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=
             # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
 
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
-            arg_type = CC.widenconst(CC.argextype(arg, ir))
+            # might include Const information
+            arg_type = CC.argextype(arg, ir)
 
             if arg isa SSAValue
                 latest_ref = max(latest_ref, loc.id)
