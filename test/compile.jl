@@ -31,6 +31,7 @@ Base.@kwdef struct ArrayNativeCompilerTarget <: GPUCompiler.AbstractCompilerTarg
     always_inline::Bool=false # will mark the job function as always inline
     jlruntime::Bool=true# Use Julia runtime for throwing errors, instead of the GPUCompiler support
     aro::ArrOptimPass = ArrOptimPass()
+    cache = AA.CodeCache()
 end
 
 GPUCompiler.llvm_triple(::ArrayNativeCompilerTarget) = Sys.MACHINE
@@ -74,8 +75,10 @@ function native_job_with_pass(@nospecialize(func), @nospecialize(types), aro::Ar
     CompilerJob(target, source, params, entry_abi, end_pass=end_pass, always_inline=false), kwargs
 end
 
+# use fresh code cache for each job
+GPUCompiler.ci_cache(job::CompilerJob{ArrayNativeCompilerTarget}) = job.target.cache
 
-GPUCompiler.get_interpreter(@nospecialize(job::CompilerJob{ArrayNativeCompilerTarget})) =
+GPUCompiler.get_interpreter(job::CompilerJob{ArrayNativeCompilerTarget}) =
     ArrayInterpreter(job.target.aro, job.source.world; ci_cache = GPUCompiler.ci_cache(job))
 
 using GPUCompiler:
@@ -87,6 +90,7 @@ function GPUCompiler.irgen(job::CompilerJob{ArrayNativeCompilerTarget}, method_i
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
 
     println("performing at end pass")
+
     ci = compiled[method_instance].ci
 
     src = if ci.inferred isa Vector{UInt8}
@@ -98,7 +102,6 @@ function GPUCompiler.irgen(job::CompilerJob{ArrayNativeCompilerTarget}, method_i
 
     # TODO: compress back?
     ci.inferred = job.target.aro(src, method_instance) 
-
 
     if job.entry_abi === :specfunc
         entry_fn = compiled[method_instance].specfunc

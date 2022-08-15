@@ -34,12 +34,6 @@ function OC(ir::IRCode, nargs::Int, isva::Bool, env...)
           Tuple{ir.argtypes[2:end]...}, Union{}, Any, @__MODULE__, src, 0, nothing, nargs - 1, isva, env)
 end
 
-export @array_opt
-
-macro array_opt(ex)
-    esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
-end
-
 function optimize(f, atype, sparams::C.SimpleVector; extra_rules=Metatheory.AbstractRule[], cache=CodeCache())
     @info "Emitting Julia"
     mi = emit_julia(f, atype, sparams)

@@ -29,10 +29,36 @@ end
 # TODO: solve the add scalar problem!
 # somehow differentiate between the different types of broadcasts
 # OR only want to optimize the end result?
+gpu_intrinsics = [Intrinsic(GlobalRef(Base, :*), 1, [1]),
+                  Intrinsic(GlobalRef(Base, :+), 1, [1])]
 
 # check if the head is in the rules
-function inrules(inst, rules)
-    return any(rule -> operation(inst) == operation(rule.left), rules)
+function inrules(ir::IRCode, inst, rules)
+    istree(inst) || return false
+    #=
+    if (operation(inst) == GlobalRef(Base, :setindex!) || operation(inst) == GlobalRef(Base, :getindex))
+        return true
+    end
+    =#
+    # PROBLEM: sometimes * -> NNlibCUDA.:* instead of Base.:* (resolve the function objects?)
+    op = operation(inst)
+    op_type = CC.widenconst(CC.argextype(op, ir))
+    #println("$op::$op_type")
+    return any(rule -> op == operation(rule.left) || op_type == typeof(resolve(operation(rule.left))), rules)
+end
+
+function inintrinsics(ir::IRCode, inst, intrinsics)
+    istree(inst) || return false
+    #=
+    if (operation(inst) == GlobalRef(Base, :setindex!) || operation(inst) == GlobalRef(Base, :getindex))
+        return true
+    end
+    =#
+    # PROBLEM: sometimes * -> NNlibCUDA.:* instead of Base.:* (resolve the function objects?)
+    op = operation(inst)
+    op_type = CC.widenconst(CC.argextype(op, ir))
+    #println("$op::$op_type")
+    return any(intrinsic -> op == intrinsic.pattern || op_type == typeof(resolve(intrinsic.pattern)), intrinsics)
 end
 
 # check if instruction matches one of the rules
@@ -87,16 +113,19 @@ function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
     et = state.et
 
     for idx in 1:length(ir.stmts)
+        stmt = ir.stmts[idx][:inst]
+        open("inlining_log", "a") do io
+            println(io, "$stmt $(inrules(ir, stmt, aro.extra_rules) || inintrinsics(ir, stmt, gpu_intrinsics))")
+        end
+
         # custom check if it is an intrinsic
-        inst = ir.stmts[idx][:inst]
-        if (isexpr(inst, :call))
-            if inrules(inst, (aro.extra_rules))
-                continue
-            end
-            instance = inintrinsics(inst, aro.intrinsics, idx)
-            if !isnothing(instance)
-                continue
-            end
+        if inrules(ir, stmt, (aro.extra_rules)) || inintrinsics(ir, stmt, gpu_intrinsics)
+            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] & ~CC.IR_FLAG_INLINE, :flag)
+            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] | CC.IR_FLAG_NOINLINE, :flag)
+            continue
+        else
+            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] & ~CC.IR_FLAG_NOINLINE, :flag)
+            #CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] | CC.IR_FLAG_INLINE, :flag)
         end
 
         simpleres = CC.process_simple!(ir, idx, state, todo)

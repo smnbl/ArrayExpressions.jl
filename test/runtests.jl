@@ -21,12 +21,15 @@ macro test_if(label, expr)
 end
 
 # Unit tests
-@test_if "rules" include("rules.jl")
+#@test_if "rules" include("rules.jl")
+
 #=
 @test_if "injection" include("injection.jl")
 =#
 
 # Integration tests
-#@test_if "gpu" include("gpu/gpu.jl")
-#@test_if "flux" include("flux.jl")
-include("tensat.jl")
+@test_if "gpu" include("gpu/gpu.jl")
+# @test_if "flux" include("flux.jl")
+# include("tensat.jl")
+# include("conv2d.jl")
+#include("conv_mnist.jl")

@@ -59,7 +59,7 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
         if inline
             # def = 100
             # thersh = typemax(Int)
-            optim_params = (optim_params..., inline_cost_threshold=10000)
+            optim_params = (optim_params..., inline_cost_threshold=100000)
         end
 
         # for internal passes -> need for custom interpreter
@@ -100,23 +100,38 @@ function CC.optimize(interp::ArrayInterpreter, opt::OptimizationState,
     return CC.finish(interp, opt, params, ir, caller)
 end
 
+export @array_opt
+
+macro array_opt(ex)
+    esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
+end
+
 function run_passes(ci::CodeInfo, sv::OptimizationState, caller::InferenceResult, aro)
     ir = CC.convert_to_ircode(ci, sv)
     ir = CC.slot2reg(ir, ci, sv)
     ir = CC.compact!(ir)
 
-    #TODO: time this
+    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)   # perform optimization
+    #if (perform_array_opt)
+    # optimize function body if decorated with @array_opt
+
     ir = custom_ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds, aro)
+    #ir = CC.ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds)
     ir = CC.compact!(ir)
 
-    # perform optimization
-    # ir = aro(ir, ci.parent.def.module)
+    if (perform_array_opt)
+        ir = aro(ir, ci.parent.def.module)
+
+        ir = CC.compact!(ir)
+    end
     
     # verify_ir(ir)
     ir = CC.sroa_pass!(ir)
     ir = CC.adce_pass!(ir)
     ir = CC.type_lift_pass!(ir)
     ir = CC.compact!(ir)
+
+    gref = GlobalRef(ci.parent.def.module, ci.parent.def.name)
     #=
     if JLOptions().debug_level == 2
         (verify_ir(ir); verify_linetable(ir.linetable))

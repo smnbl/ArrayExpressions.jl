@@ -59,6 +59,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
+        println("GlobalRef: $type")
         return visited, Input(inst, type), latest_ref
 
     else # PhiNodes, etc...
@@ -126,8 +127,17 @@ end
 
 # TODO: create structs for the custom types, tuples and pairs can get a bit smelly
 
+struct TodoItem
+    exprs::Dict{OldSSAValue, ArrayIR} # extraction loc -> expression
+    visited::Vector{Int64}
+end
+
 # Array optimizations pass
 function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
+    open("irdump_before.ir", "w") do io
+           print(io, ir)
+    end
+
     stmts = ir.stmts
     visited = Int64[]
 
@@ -145,9 +155,8 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         end
     end
 
-
     # loc of insertion, expr tree to optimize
-    todo = Pair{OldSSAValue, Dict{OldSSAValue, ArrayIR}}[]
+    todo = Pair{OldSSAValue, TodoItem}[]
     current_bb = CC.block_for_inst(ir.cfg, length(stmts))
 
     # loc start of expr => extracted expression
@@ -165,9 +174,10 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
                 if isnothing(insert_loc)
                     throw("insert loc should be set!") 
                 end
-                push!(todo, Pair(insert_loc, exprs))
+                push!(todo, Pair(insert_loc, TodoItem(exprs, visited)))
             end
 
+            visited = Int64[]
             exprs = Dict{OldSSAValue, ArrayIR}()
             insert_loc = nothing
             current_bb = CC.block_for_inst(ir.cfg, idx)
@@ -183,9 +193,13 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # check if return type is StubArray and use this to confirm array ir
         #iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
-        rule = inrules(inst, aro.extra_rules)
+        println(inst)
+
+        rule = inrules(ir, inst, aro.extra_rules)
         # TODO: bench hom much speedup due to inrules!
         rule || continue 
+
+        println("inrules")
 
         # check if correct return type -> does not work when working with tuples!
         # rettype = CC.widenconst(stmts[idx][:type])
@@ -206,7 +220,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     end
     # push from last bb
     if(!isnothing(insert_loc))
-        push!(todo, Pair(insert_loc, exprs))
+        push!(todo, Pair(insert_loc, TodoItem(exprs, visited)))
     end
 
     # if nothing found, just return ir
@@ -217,8 +231,12 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     todo_opt = Dict{OldSSAValue, Tuple{Expr, Type, Any}}()
 
+    # visited used to clean up
+    visited_clean = Int64[]
+
     # TODO: do all in 1 iteration over the intsts (1 compacting iteration)
-    for (loc, exprs) in todo
+    for (loc, item) in todo
+        exprs = item.exprs
         # 2. construct output tuple
         # wrap arexpr in output function
         # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
@@ -229,15 +247,17 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         #println(output)
         #println(">>>")
 
-        println("before: $output")
         # 3. jointly optimize output tuple
         simplified = simplify(output, extra_rules=aro.extra_rules)
         #println("simplified = $op")
         #println("---")
 
+        println("before: $output")
         println("after: $simplified")
 
-        if hash(output) == hash(simplified)
+        # TODO: broken as resp visited nodes are not removed
+        if fingerprint(output) == fingerprint(simplified)
+            println("skipping injection")
             # trees most likely stayed the same
             continue
         end
@@ -272,22 +292,25 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # doesn't seem to work with opaque closures :(
         call_expr =  Expr(:call, oc, arguments...)
 
+        union!(visited_clean, item.visited)
         push!(todo_opt, Pair(loc, (call_expr, tuple_type, collect(keys(exprs)))))
     end
 
     # TODO: add output map
     # Have to set output type to (Any, ...), otherwise segmentation faults -> TODO: investigate, seems to be the case if there is a mismatch in the return types
-    ir = replace!(ir, visited, todo_opt, nothing)
+    ir = replace!(ir, visited_clean, todo_opt, nothing)
+
+    open("irdump.ir", "w") do io
+           print(io, ir)
+    end
 
     return ir
 end
 
 function (aro::ArrOptimPass)(code_info::CodeInfo, method_instance::MethodInstance)
     ir = CC.inflate_ir(code_info, method_instance)
-    println(ir)
 
     ir = aro(ir, method_instance.def.module)
-
 
     println("replacing code newstyle")
     CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))

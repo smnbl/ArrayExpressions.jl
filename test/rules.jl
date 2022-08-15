@@ -1,23 +1,19 @@
 using ArrayAbstractions: ArrayExpr, Input
 const AA = ArrayAbstractions
 using Metatheory
-using Metatheory: Chain
 
 # test inrules instruction matcher
-inst = Expr(:call, :test, :A, :B)
-inst2 = Expr(:call, :test2, :A, :B)
-inst3 = Expr(:call, :test, :A)
-inst4 = Expr(:call, :test, :A, :B, :C)
+inst4 = Expr(:invoke, nothing, Input(GlobalRef(ArrayAbstractions, :+), typeof(ArrayAbstractions.:+)), :A, :B)
+inst3 = Expr(:invoke, nothing, Input(GlobalRef(Metatheory, :*), typeof(ArrayAbstractions.:*)), :A, :B)
+inst5 = Expr(:call, Input(GlobalRef(ArrayAbstractions, :*), typeof(ArrayAbstractions.:*)), :A, :B)
 
-rules = @theory A B C begin
-    test(A, B) == blabla(A, B)
-    test(A, B, C) == bla(A, B, C)
+rules = @array_theory A B C begin
+    A * B == B * A
 end
 
-@test AA.inrules(inst, rules) == true
-@test AA.inrules(inst2, rules) == false
-@test AA.inrules(inst2, rules) == false
-@test AA.inrules(inst4, rules) == true
+@test AA.inrules(inst3, rules) == true
+@test AA.inrules(inst4, rules) == false
+@test AA.inrules(inst5, rules) == true
 
 # test array rules
 let l = @array_rule Main.println(11) --> 10
@@ -39,7 +35,7 @@ let gemm = @array_rule (~A * ~B) + ~C --> Gemm(~A, ~B, ~C)
 end
 
 # test input unwrapping
-input = Input(GlobalRef(Main, :println))
+input = Input(GlobalRef(Main, :println), typeof(Main.println))
 @test isequal(input, GlobalRef(Main, :println))
 @test isequal(GlobalRef(Main, :println), input)
 
@@ -52,7 +48,7 @@ let t = @array_theory A begin
     Main.println(A) --> A
 end
     e = ArrayExpr(:call, [Input(GlobalRef(Main, :println)), 11], Union{})
-    @test Chain(t)(e) == 11
+    @test Metatheory.Chain(t)(e) == 11
 end
 
 # global ref resolver
@@ -66,7 +62,17 @@ let multi = @array_rule (print(~A), print(~B)) --> print((~A, ~B))
 end
 
 
+matmul(a, b) = println("matmul")
+split(a, b) = println("split")
+concat(a, b) = println("concat")
+
 let multi = @array_rule (matmul(~x, ~w1), matmul(~x, ~w2)) --> split(matmul(~x, concat(~w1, ~w2)))
     e = ArrayExpr(:tuple, [ArrayExpr(:call, [Input(GlobalRef(Main, :matmul)), :x, :w1]), ArrayExpr(:call, [Input(GlobalRef(Main, :matmul)), :x, :w2])])
     @test multi(e) == ArrayExpr(:call, [GlobalRef(Main, :split), ArrayExpr(:call, [GlobalRef(Main, :matmul), :x, ArrayExpr(:call, [GlobalRef(Main, :concat), :w1, :w2])])])
+end
+
+# test fuzzy rule match
+let l = @array_rule ~A * ~B --> Gemm(~A, ~B)
+    e = ArrayExpr(:call, [Input(GlobalRef(ArrayAbstractions, :*)), :A, :B])
+    @test l(e) == ArrayExpr(:call, [GlobalRef(Main, :Gemm), :A, :B])
 end

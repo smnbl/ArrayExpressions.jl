@@ -18,13 +18,21 @@ end
 struct Input
     val::Any
     type::Type
+    Input(val::GlobalRef) = new(val, typeof(resolve(val)))
     Input(val::Any) = new(val, Any)
     Input(val::Any, type::Type) = new(val, type)
 end
 
-Base.isequal(input::Input, other) = input.val == other
-Base.isequal(other, input::Input) = input.val == other
-Base.isequal(input::Input, input2::Input) = input.val == input2.val
+import Base.(==)
+(==)(input::Input, other) = input.val == other
+(==)(other, input::Input) = input.val == other
+(==)(input::Input, input2::Input) = input.val == input2.val
+
+(==)(input::Input, other::Type) = input.type == other
+(==)(other::Type, input::Input) = input.type == other
+
+(==)(input::Input, other::GlobalRef) = input.type == typeof(resolve(other))
+(==)(other::GlobalRef, input::Input) = input.type == typeof(resolve(other))
 
 struct ArrayExpr
     head::Any
@@ -36,11 +44,14 @@ end
 
 const ArrayIR = Union{Input, ArrayExpr}
 
-import Base.(==)
 (==)(a::ArrayExpr, b::ArrayExpr) = a.head == b.head && a.args == b.args
-           
 
 convert(::Type{Expr}, expr::ArrayExpr) = Expr(expr.head, expr.args...)
+
+fingerprint(G::ArrayExpr) = fingerprint(G.head) + sum(fingerprint.(G.args)) # expressions
+fingerprint(O::Output) = fingerprint(O.val)
+fingerprint(I::Input) = fingerprint(I.val) # equality saturation might strip typing information
+fingerprint(x::Any) = hash(x) # values
 
 function Lambda(binding::Symbol, body)
     return ArrayExpr(:->, [binding, body], Union{})
@@ -55,7 +66,7 @@ function Phi(edges, values, type=Union{})
 end
 
 function Base.show(io::IO, e::Input)
-    print(io, "→$(e.val)")
+    print(io, "→$(e.val)::$(e.type)")
 end
 
 function Base.show(io::IO, e::ArrayExpr)
@@ -99,24 +110,29 @@ end
 TI.istree(x::Type{ArrayExpr}) = true
 TI.exprhead(e::ArrayExpr) = e.head
 
-TI.operation(e::ArrayExpr) = expr_operation(e, Val{exprhead(e)}())
-TI.arguments(e::ArrayExpr) = expr_arguments(e, Val{exprhead(e)}())
+TI.operation(e::ArrayExpr) = expr_operation(e, Val{TI.exprhead(e)}())
+TI.arguments(e::ArrayExpr) = expr_arguments(e, Val{TI.exprhead(e)}())
+
+# HACK: fix for :invoke Expr
+TI.operation(e::Expr) = expr_operation(e, Val{TI.exprhead(e)}())
+TI.arguments(e::Expr) = expr_arguments(e, Val{TI.exprhead(e)}())
+
+expr_operation(e::Expr, ::Union{Val{:call},Val{:macrocall}}) = e.args[1]
+expr_operation(e::Expr, ::Union{Val{:invoke}}) = e.args[2]
+expr_operation(e::Expr, ::Union{Val{:ref}}) = getindex
+expr_operation(e::Expr, ::Val{T}) where {T} = T
+
+expr_arguments(e::Expr, ::Union{Val{:call},Val{:macrocall}}) = e.args[2:end]
+expr_arguments(e::Expr, ::Union{Val{:invoke}}) = e.args[3:end]
+expr_arguments(e::Expr, _) = e.args
 
 # See https://docs.julialang.org/en/v1/devdocs/ast/
 function expr_operation(e::ArrayExpr, ::Union{Val{:call}})
-    # TODO: fix this hack by fixing matching with function objects!
     e.args[1]
 end
 
 function expr_operation(e::ArrayExpr, ::Union{Val{:invoke}})
-    e.args[1]
-    #= FIXME BY FIXING MATCHING
-    if (e.args[2] isa ArrayExpr && e.args[2].head == :call && e.args[2].args[1] == :input)
-        e.args[2].args[2]
-    else
-        e.args[2]
-    end
-    =#
+    e.args[2]
 end
 
 expr_arguments(e::ArrayExpr, ::Union{Val{:call}}) = e.args[2:end]

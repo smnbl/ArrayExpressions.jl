@@ -28,6 +28,7 @@ function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
             op = makepattern(op, pvars, slots, mod)
         elseif op isa Symbol
             # TODO: investigate what to supply as mod ?
+            # HACK
             op = QuoteNode(GlobalRef(mod, op))
         end
 
@@ -58,6 +59,7 @@ function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
     # NEW:
     elseif head === :.
         m = resolveref(args[1], mod)
+        # HACK
         return QuoteNode(GlobalRef(m, args[2].value))
     else 
         patargs = map(i -> makepattern(i, pvars, slots, mod), args) # recurse
@@ -182,6 +184,7 @@ const adjoint_properties = @array_theory A B begin
 end
 
 function gettype(X::EClass)
+    hasdata(X, MetadataAnalysis) || return Any
     ty = getdata(X, MetadataAnalysis)
     if (ty == nothing)
         Any
@@ -219,19 +222,26 @@ function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
         op = op.val
     end
 
+    args = arguments(n)
+
     if op == GlobalRef(Main, :GemmWithEpilogue)
         cost = 1
     elseif op == GlobalRef(Main, :Gemm)
         cost = 10
+        # ignore last arguments (const)
+        args = args[1:3]
     elseif op == GlobalRef(Main, :matmul)
-        cost = 10000
+        cost = 1000
     elseif op == :tuple
         cost = 0
+    elseif op == GlobalRef(Base, :copyto!) || op == GlobalRef(Base, :_to_linear_index)
+        println("whoop")
+        cost = 1
     else
-        cost = 100
+        cost = 1000
     end
 
-    for id in arguments(n)
+    for id in args
         eclass = g[id]
         # if the child e-class has not yet been analyzed, return +Inf
         !hasdata(eclass, an) && (cost += Inf; break)
