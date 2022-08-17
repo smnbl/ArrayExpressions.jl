@@ -61,7 +61,6 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
         push!(visited, loc.id)
-        println("GlobalRef: $type")
         return visited, Input(inst, type), latest_ref
 
     else # PhiNodes, etc...
@@ -140,6 +139,8 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
            print(io, ir)
     end
 
+    expression_log = open("expression_log", "w")
+
     stmts = ir.stmts
     visited = Int64[]
 
@@ -149,6 +150,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     for idx in 1:length(ir.stmts)
         # lower invokes to calls
+        # also done to make metatheory matching work
         # TODO: move this to custom inlining
         inst = ir.stmts.inst[idx]
         if (CC.isexpr(inst, :invoke))
@@ -195,13 +197,9 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # check if return type is StubArray and use this to confirm array ir
         #iscopyto_array = iscall(inst, GlobalRef(Main, :copyto!)) && correct_rettype(CC.widenconst(CC.argextype(inst.args[2], ir)))
 
-        println(inst)
-
         rule = inrules(ir, inst, aro.extra_rules)
         # TODO: bench hom much speedup due to inrules!
         rule || continue 
-
-        println("inrules")
 
         # check if correct return type -> does not work when working with tuples!
         # rettype = CC.widenconst(stmts[idx][:type])
@@ -254,12 +252,12 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         #println("simplified = $op")
         #println("---")
 
-        println("before: $output")
-        println("after: $simplified")
+        println(expression_log, "before: $output")
+        println(expression_log, "after: $simplified")
 
         # TODO: broken as resp visited nodes are not removed
         if fingerprint(output) == fingerprint(simplified)
-            println("skipping injection")
+            println(expression_log, "skipping injection")
             # trees most likely stayed the same
             continue
         end
@@ -267,8 +265,8 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # 4. insert optimized expression back
         expr, input_map = codegen_expr!(simplified.args[1], length(ir.argtypes))
 
-        println("compiling expression:")
-        println(expr)
+        println(expression_log, "compiling expression:")
+        println(expression_log, expr)
 
         # note: world age changes here
         # TODO: investigate if problem, read world age paper
@@ -301,6 +299,8 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     # TODO: add output map
     # Have to set output type to (Any, ...), otherwise segmentation faults -> TODO: investigate, seems to be the case if there is a mismatch in the return types
     ir = replace!(ir, visited_clean, todo_opt, nothing)
+
+    close(expression_log)
 
     open("irdump.ir", "w") do io
            print(io, ir)

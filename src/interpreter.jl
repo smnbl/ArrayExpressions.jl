@@ -59,7 +59,7 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
         if inline
             # def = 100
             # thersh = typemax(Int)
-            optim_params = (optim_params..., inline_cost_threshold=100000)
+            optim_params = (optim_params..., inline_cost_threshold=1000000)
         end
 
         # for internal passes -> need for custom interpreter

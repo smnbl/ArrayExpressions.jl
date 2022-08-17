@@ -60,7 +60,7 @@ end
         throw(DimensionMismatch("Dimensions do not match, $(size(A)) x $(size(B)) = $(size(C))"))
     end
 
-    println("$(size(A)) x $(size(B)) = $(size(C))")
+    println("$(alpha)*($(size(A)) x $(size(B))) + $(beta)*$(size(C)) = $(size(D))")
 
     a_layout = GemmKernels.BLAS.global_layout(typeof(A), Val(false))
     b_layout = GemmKernels.BLAS.global_layout(typeof(B), Val(false))
@@ -110,37 +110,43 @@ end
 (epi::EpiR)(el) = epi.func(epi.c, el)
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [GlobalRef(Main, :Gemm), A, B, C], Union{})
-end
-
-function Gemm(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [GlobalRef(Main, :Gemm), A, B, C, 1.0, 1.0], Union{})
+    println("3gemm")
+    return ArrayExpr(:call, [Gemm, A, B, C], Union{})
 end
 
 function Gemm(A::EClass, B::EClass)
     # this will not be used tho, make it smarter?
     C = :(CuArray{T}(undef, (size(A, 1), size(B, 2))))
-    return ArrayExpr(:call, [GlobalRef(Main, :Gemm), A, B, C, 1.0, 0.0], Union{})
+    return ArrayExpr(:call, [Gemm, A, B, C, 1.0, 0.0], Union{})
 end
 
 function Gemm!(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [GlobalRef(Main, :Gemm!), A, B, C], Union{})
+    return ArrayExpr(:call, [Gemm!, A, B, C], Union{})
 end
 
 function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [GlobalRef(Main, :GemmWithEpilogue), A, B, C, epilogue], Union{})
+    println("matching gemm_with_epilogue: $epilogue")
+    return ArrayExpr(:call, [GemmWithEpilogue, A, B, C, epilogue], Union{})
 end
 
 function GemmWithAdd(A::EClass, B::EClass, C::EClass, d)
-    return ArrayExpr(:call, [GlobalRef(Main, :GemmWithAdd), A, B, C, d], Union{})
+    return ArrayExpr(:call, [GemmWithAdd, A, B, C, d], Union{})
 end
 
 function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [GlobalRef(Main, :GemmWithEpilogue!), A, B, C, epilogue], Union{})
+    return ArrayExpr(:call, [GemmWithEpilogue!, A, B, C, epilogue], Union{})
 end
 
 function GemmKernelsBias(A::EClass, B::EClass, C::EClass, bias)
-    return ArrayExpr(:call, [GlobalRef(Main, :GemmBias), A, B, C, epilogue])
+    return ArrayExpr(:call, [GemmBias, A, B, C, epilogue])
+end
+
+# temporary fix
+function conditional_gemm(op, A, B, C)
+    if istype(op, typeof(+))
+        return Gemm(A, B, C)
+    end
+    return nothing
 end
 
 # big rewrite rules with custom implementations
@@ -149,8 +155,15 @@ const gemm_properties = @array_theory A B C op d epi begin
     # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
     # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
 
-    A * B => Gemm(A, B) where (istype(A, CuMatrix) && istype(B, CuMatrix))
+    #A * B => Gemm(A, B) where (istype(A, CuMatrix) && istype(B, CuMatrix))
     A * B + C => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
+
+    # temporary fix as matching with op doesn't seem to work (hashing issue?) -> look at EGraph.lookup
+    broadcast(op, A * B, C) => Gemm(A, B, C) where (istype(op, typeof(+)) && istype(A, CuArray) && istype(B, CuArray) && istype(C, CuArray))
+
+    # TODO: these ones are broken for now
+    #broadcast(+, A * B, C) => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
+    #broadcast(+, C, A * B) => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
 
     # merge operations in prologue / epilogue
     # TODO: how to merge with prefix? prologue?

@@ -171,7 +171,7 @@ function GPUCompiler.irgen(job::CompilerJob{ArrayNativeCompilerTarget}, method_i
     end
 
     compiled[method_instance] =
-        (; compiled[method_instance].ci, func, specfunc)
+        (; ci, func, specfunc)
 
     # minimal required optimization
     @timeit_debug to "rewrite" ModulePassManager() do pm

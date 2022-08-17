@@ -9,6 +9,10 @@ using TermInterface
 
 # treat as a literal
 function makepattern(x, pvars, slots, mod=@__MODULE__, splat=false) 
+    # wrap symbol in its context
+    if (x isa Symbol && !(x in slots))
+        return QuoteNode(getproperty(mod, x))
+    end
     if splat 
         x in slots ? Metatheory.Syntax.makesegment(x, pvars) : x
     else
@@ -29,7 +33,7 @@ function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
         elseif op isa Symbol
             # TODO: investigate what to supply as mod ?
             # HACK
-            op = QuoteNode(GlobalRef(mod, op))
+            op = QuoteNode(getproperty(mod, op))
         end
 
         if operation(ex) === :(~) # is a variable or segment
@@ -59,9 +63,10 @@ function makepattern(ex::Expr, pvars, slots, mod=@__MODULE__, splat=false)
     # NEW:
     elseif head === :.
         m = resolveref(args[1], mod)
-        # HACK
-        return QuoteNode(GlobalRef(m, args[2].value))
+        return QuoteNode(getproperty(m, args[2].value))
+        # return QuoteNode(GlobalRef(mod, args[2].value))
     else 
+        # TODO: :tuple -> :call tuple ?
         patargs = map(i -> makepattern(i, pvars, slots, mod), args) # recurse
         return :($PatTerm($(head isa Symbol ? QuoteNode(head) : head), $(op isa Symbol ? QuoteNode(op) : op), [$(patargs...)], $mod))
         # throw(Meta.ParseError("Unsupported pattern syntax $ex"))
@@ -144,9 +149,9 @@ end
 
 # canonicalize broadcasts using classic term rewriting
 const canonicalize_broadcasting = @array_theory A B op begin
-    Base.materialize(A) --> A
-    Base.broadcasted(op, A, B) --> Main.broadcast(op, A, B)
-    Base.broadcasted(op, A) --> Main.broadcast(op, A)
+    Base.materialize(A) == identity(A)
+    Base.broadcasted(op, A, B) == Base.broadcast(op, A, B)
+    Base.broadcasted(op, A) == Base.broadcast(op, A)
     # TODO: generic in nr of arguments
 end
 
@@ -160,7 +165,7 @@ const addition_properties = @array_theory A B C begin
     broadcast(+, broadcast(+, A, B), C) == broadcast(+, A, broadcast(+, C, B))
 
     # lowering of addition with itself, useful?
-    broadcast(+, C, C) == C .* 2
+    broadcast(+, C, C) == broadcast(*, C, 2)
 
     # TODO: add dynamic identity / neutral element rule
 end
@@ -180,7 +185,7 @@ const multiplication_properties = @array_theory A B C d begin
 end
 
 const adjoint_properties = @array_theory A B begin
-    adjoint(adjoint(A)) == A
+    adjoint(adjoint(A)) == identity(A)
 end
 
 function gettype(X::EClass)
@@ -224,7 +229,10 @@ function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
 
     args = arguments(n)
 
-    if op == GlobalRef(Main, :GemmWithEpilogue)
+    # force broadcast canonicalization
+    if op == GlobalRef(Base, :broadcasted) || op == GlobalRef(Base, :materialize)
+        cost = +Inf
+    elseif op == GlobalRef(Main, :GemmWithEpilogue)
         cost = 1
     elseif op == GlobalRef(Main, :Gemm)
         cost = 10
@@ -256,7 +264,7 @@ end
 
 cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 1
 
-const theory = addition_properties ∪ multiplication_properties ∪ addition_properties
+const theory = addition_properties ∪ multiplication_properties ∪ addition_properties ∪ canonicalize_broadcasting
 
 # TODO: should we lower dot & plus to map / reduce combos?
 # NOTE: as long as tensor_expr satisfies TermInterface, this will work
@@ -268,7 +276,8 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
     tensor_expr = tensor_expr.args[1]
 
     # TODO: fix this, typing info is lost :(
-    tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
+    # -> forced using cost function
+    #tensor_expr = Postwalk(Chain(canonicalize_broadcasting))(tensor_expr)
     
     # Equality Saturation
     g = EGraph(tensor_expr; keepmeta = true)

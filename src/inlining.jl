@@ -40,7 +40,6 @@ function inrules(ir::IRCode, inst, rules)
         return true
     end
     =#
-    # PROBLEM: sometimes * -> NNlibCUDA.:* instead of Base.:* (resolve the function objects?)
     op = operation(inst)
     op_type = CC.widenconst(CC.argextype(op, ir))
     #println("$op::$op_type")

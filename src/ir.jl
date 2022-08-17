@@ -18,21 +18,25 @@ end
 struct Input
     val::Any
     type::Union{Core.Const, Type}
-    Input(val::GlobalRef) = new(val, typeof(resolve(val)))
+    Input(val::GlobalRef) = new(val, Core.Const(resolve(val)))
     Input(val::Any) = new(val, Any)
     Input(val::Any, type) = new(val, type)
 end
 
 import Base.(==)
-(==)(input::Input, other) = input.val == other
-(==)(other, input::Input) = input.val == other
-(==)(input::Input, input2::Input) = input.val == input2.val
+(==)(input::Input, other) = (input.type isa Core.Const) ? input.type.val == other : input.val == other
+(==)(other, input::Input) = (input.type isa Core.Const) ? input.type.val == other : input.val == other
+(==)(input::Input, input2::Input) = (input.type isa Core.Const && input2.type isa Core.Const) ? input.type == input2.type : input.val == input2.val
 
 (==)(input::Input, other::Type) = CC.widenconst(input.type) == other
 (==)(other::Type, input::Input) = CC.widenconst(input.type) == other
 
 (==)(input::Input, other::GlobalRef) = CC.widenconst(input.type) == typeof(resolve(other))
 (==)(other::GlobalRef, input::Input) = CC.widenconst(input.type) == typeof(resolve(other))
+
+function Base.hash(input::Input, salt::UInt)
+    (input.type isa Core.Const) ? hash(input.type.val, salt) : hash(input.val, salt)
+end
 
 struct ArrayExpr
     head::Any

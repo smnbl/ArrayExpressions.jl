@@ -1,4 +1,5 @@
 module ArrayAbstractions
+
 using CUDA
 
 export ArrayIR
