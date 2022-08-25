@@ -4,6 +4,7 @@ using Core.Compiler: InferenceParams,
     OptimizationParams,
     OptimizationState,
     InferenceResult,
+    InferenceState,
     CodeInfo
 
 using Core.Compiler: WorldView
@@ -18,8 +19,8 @@ struct ArrOptimPass
     extra_rules::Vector{Metatheory.AbstractRule}
     intrinsics::Vector{Intrinsic}
     mod::Module
-
-    ArrOptimPass(eltype; mod=@__MODULE__, extra_rules=[], intrinsics=[]) = return new(eltype, extra_rules, intrinsics, mod)
+    cost_function::Function
+    ArrOptimPass(eltype, cost_function; mod=@__MODULE__, extra_rules=[], intrinsics=[]) = new(eltype, extra_rules, intrinsics, mod, cost_function)
 end
 
 """
@@ -59,7 +60,8 @@ struct ArrayInterpreter <: CC.AbstractInterpreter
         if inline
             # def = 100
             # thersh = typemax(Int)
-            optim_params = (optim_params..., inline_cost_threshold=1000000)
+            # change threshold on function body (lower for Core.Compiler functions?) that is being optimized?
+            optim_params = (optim_params..., inline_cost_threshold=100000)
         end
 
         # for internal passes -> need for custom interpreter
@@ -93,11 +95,54 @@ CC.lock_mi_inference(::ArrayInterpreter, mi::MethodInstance) = (mi.inInference =
 
 CC.unlock_mi_inference(::ArrayInterpreter, mi::MethodInstance) = (mi.inInference = false; nothing)
 
+# 1.7
+CC.may_optimize(::ArrayInterpreter) = true
+CC.may_compress(::ArrayInterpreter) = false
+CC.may_discard_trees(::ArrayInterpreter) = true
+CC.verbose_stmt_info(::ArrayInterpreter) = false
+
+function CC.add_remark!(::ArrayInterpreter, sv::InferenceState, msg)
+end
+
+#= 1.8
 # run the optimization work
 function CC.optimize(interp::ArrayInterpreter, opt::OptimizationState,
                   params::OptimizationParams, caller::InferenceResult)
     ir = run_passes(opt.src, opt, caller, interp.aro)
     return CC.finish(interp, opt, params, ir, caller)
+end
+=#
+
+# run the optimization work
+function CC.optimize(interp::ArrayInterpreter, opt::OptimizationState, params::OptimizationParams, @nospecialize(result))
+    nargs = Int(opt.nargs) - 1
+    # timeit?
+    ir = run_passes(opt.src, nargs, opt, interp.aro)
+    # CC.finish(interp, opt, params, ir, result)
+    finish(interp, opt, params, ir, result)
+end
+
+# compute inlining cost and sideeffects
+# doesnt work :(
+function finish(interp::ArrayInterpreter, opt::OptimizationState, params::OptimizationParams, ir::IRCode, @nospecialize(result))
+    (; src, nargs, linfo) = opt
+
+    aro = interp.aro
+
+    ref = GlobalRef(src.parent.def.module, src.parent.def.name)
+    #println(ref)
+
+    if (src.parent.def.module === Core.Compiler)
+        params = CC.OptimizationParams(; inline_cost_threshold=100)
+    end
+
+    # this will write .inlineable
+    CC.finish(interp, opt::OptimizationState, params::OptimizationParams, ir::IRCode, @nospecialize(result))
+
+    # overwrite inlineability
+    if inrules(ir, ref, (aro.extra_rules)) || inintrinsics(ir, ref, gpu_intrinsics)
+        src.inlineable = false
+    end
 end
 
 export @array_opt
@@ -106,6 +151,46 @@ macro array_opt(ex)
     esc(isa(ex, Expr) ? Base.pushmeta!(ex, :array_opt) : ex)
 end
 
+function run_passes(ci::CodeInfo, nargs::Int, sv::OptimizationState, aro)
+    preserve_coverage = CC.coverage_enabled(sv.mod)
+    ir = CC.convert_to_ircode(ci, CC.copy_exprargs(ci.code), preserve_coverage, nargs, sv)
+    ir = CC.slot2reg(ir, ci, nargs, sv)
+    #@Base.show ("after_construct", ir)
+    # TODO: Domsorting can produce an updated domtree - no need to recompute here
+    ir = CC.compact!(ir)
+    #@timeit "Inlining" ir = ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds)
+    #ir = custom_ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds, aro)
+    ir = CC.ssa_inlining_pass!(ir, ir.linetable, sv.inlining, ci.propagate_inbounds)
+    #@timeit "verify 2" verify_ir(ir)
+    ir = CC.compact!(ir)
+
+    #@Base.show ("before_sroa", ir)
+    ir = CC.getfield_elim_pass!(ir)
+    #@Base.show ir.new_nodes
+    #@Base.show ("after_sroa", ir)
+    ir = CC.adce_pass!(ir)
+    ir = CC.type_lift_pass!(ir)
+    ir = CC.compact!(ir)
+
+    perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)   # perform optimization
+    if (perform_array_opt)
+        println("performing array opt pass")
+        ir = aro(ir, ci.parent.def.module)
+        println("array opt pass done!")
+    end
+    ir = CC.compact!(ir)
+
+    #@Base.show ir
+    #=
+    if JLOptions().debug_level == 2
+        @timeit "verify 3" (verify_ir(ir); verify_linetable(ir.linetable))
+    end
+    =#
+    return ir
+end
+
+
+#= 1.8
 function run_passes(ci::CodeInfo, sv::OptimizationState, caller::InferenceResult, aro)
     ir = CC.convert_to_ircode(ci, sv)
     ir = CC.slot2reg(ir, ci, sv)
@@ -139,3 +224,4 @@ function run_passes(ci::CodeInfo, sv::OptimizationState, caller::InferenceResult
     =#
     return ir
 end
+=#

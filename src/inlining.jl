@@ -5,6 +5,7 @@ using Metatheory: AbstractRule
 const CC = Core.Compiler
 
 
+
 using Core.Compiler:
     IRCode,
     isexpr,
@@ -40,10 +41,24 @@ function inrules(ir::IRCode, inst, rules)
         return true
     end
     =#
+    # 1.8
+    # op_type = CC.widenconst(CC.argextype(op, ir))
     op = operation(inst)
-    op_type = CC.widenconst(CC.argextype(op, ir))
+    op_type = CC.widenconst(CC.argextype(op, ir, ir.sptypes))
     #println("$op::$op_type")
     return any(rule -> op == operation(rule.left) || op_type == typeof(resolve(operation(rule.left))), rules)
+end
+
+function inrules(ir::IRCode, ref::GlobalRef, rules)
+    op = ref
+    op_type = CC.widenconst(CC.argextype(op, ir, ir.sptypes))
+    return any(rule -> op == operation(rule.left) || op_type == typeof(resolve(operation(rule.left))), rules)
+end
+
+function inintrinsics(ir::IRCode, ref::GlobalRef, intrinsics)
+    op = ref
+    op_type = CC.widenconst(CC.argextype(op, ir, ir.sptypes))
+    return any(intrinsic -> op == intrinsic.pattern || op_type == typeof(resolve(intrinsic.pattern)), intrinsics)
 end
 
 function inintrinsics(ir::IRCode, inst, intrinsics)
@@ -55,7 +70,8 @@ function inintrinsics(ir::IRCode, inst, intrinsics)
     =#
     # PROBLEM: sometimes * -> NNlibCUDA.:* instead of Base.:* (resolve the function objects?)
     op = operation(inst)
-    op_type = CC.widenconst(CC.argextype(op, ir))
+    # op_type = CC.widenconst(CC.argextype(op, ir))
+    op_type = CC.widenconst(CC.argextype(op, ir, ir.sptypes))
     #println("$op::$op_type")
     return any(intrinsic -> op == intrinsic.pattern || op_type == typeof(resolve(intrinsic.pattern)), intrinsics)
 end
@@ -105,6 +121,7 @@ function compare(canonical_name::String, derived_name::String)
     return canonical_name == strip(pred, derived_name)
 end
 
+#= 1.8
 # -> not inlining when flagged as intrinsic
 function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
     # todo = (inline_idx, (isva, isinvoke, na), method, spvals, inline_linetable, inline_ir, lie)
@@ -182,6 +199,86 @@ function custom_assemble_inline_todo!(ir::IRCode, state::CC.InliningState, aro)
     end
     todo
 end
+=#
+
+using Core.Compiler: InliningState, OpaqueClosureCallInfo, IRCode, analyze_single_call!, MethodMatchInfo, ConstCallInfo, inline_invoke!, handle_single_case!, analyze_method!, handle_const_opaque_closure_call!, InvokeCallInfo, UnionSplitInfo, process_simple!, MethodResultPure, is_inlineable_constant, quoted, maybe_handle_const_call!, Const, IR_FLAG_EFFECT_FREE
+
+function custom_assemble_inline_todo!(ir::IRCode, state::InliningState, aro)
+    # todo = (inline_idx, (isva, isinvoke, na), method, spvals, inline_linetable, inline_ir, lie)
+    todo = Pair{Int, Any}[]
+    et = state.et
+    for idx in 1:length(ir.stmts)
+        sig = process_simple!(ir, todo, idx, state)
+        sig === nothing && continue
+
+        stmt = ir.stmts[idx][:inst]
+        info = ir.stmts[idx][:info]
+
+        # Check whether this call was @pure and evaluates to a constant
+        if info isa MethodResultPure
+            calltype = ir.stmts[idx][:type]
+            if calltype isa Const && is_inlineable_constant(calltype.val)
+                CC.setindex!(ir.stmts[idx], quoted(calltype.val), :inst)
+                continue
+            end
+            CC.setindex!(ir.stmts[idx], ir.stmts[idx][:flag] | IR_FLAG_EFFECT_FREE, :flag)
+            info = info.info
+        end
+
+        # Inference determined this couldn't be analyzed. Don't question it.
+        if info === false
+            continue
+        end
+
+        # if inference arrived here with constant-prop'ed result(s),
+        # we can perform a specialized analysis for just this case
+        if isa(info, ConstCallInfo)
+            if isa(info.call, OpaqueClosureCallInfo)
+                handle_const_opaque_closure_call!(
+                    ir, idx, stmt, info,
+                    sig, state, todo)
+                continue
+            else
+                maybe_handle_const_call!(
+                    ir, idx, stmt, info, sig,
+                    state, sig.f === Core.invoke, todo) && continue
+            end
+            info = info.call # cascade to the non-constant handling
+        end
+
+        if isa(info, OpaqueClosureCallInfo)
+            item = analyze_method!(info.match, sig.atypes, state)
+            handle_single_case!(ir, stmt, idx, item, false, todo)
+            continue
+        end
+
+        #=
+        if inrules(ir, stmt, (aro.extra_rules)) || inintrinsics(ir, stmt, gpu_intrinsics)
+            continue
+        end
+        =#
+
+        # Handle invoke
+        if sig.f === Core.invoke
+            if isa(info, InvokeCallInfo)
+                inline_invoke!(ir, idx, sig, info, state, todo)
+            end
+            continue
+        end
+
+        # Ok, now figure out what method to call
+        if isa(info, MethodMatchInfo)
+            infos = MethodMatchInfo[info]
+        elseif isa(info, UnionSplitInfo)
+            infos = info.matches
+        else
+            continue
+        end
+
+        analyze_single_call!(ir, todo, idx, stmt, sig, infos, state)
+    end
+    todo
+end
 
 function custom_ssa_inlining_pass!(ir::IRCode, linetable::Vector{CC.LineInfoNode}, state::CC.InliningState, propagate_inbounds::Bool, aro)
     # Go through the function, performing simple ininlingin (e.g. replacing call by constants
@@ -189,6 +286,9 @@ function custom_ssa_inlining_pass!(ir::IRCode, linetable::Vector{CC.LineInfoNode
     todo = custom_assemble_inline_todo!(ir, state, aro)
     CC.isempty(todo) && return ir
     # Do the actual inlining for every call we identified
-    ir = CC.batch_inline!(todo, ir, linetable, propagate_inbounds, state.params)
+
+    # 1.8
+    # ir = CC.batch_inline!(todo, ir, linetable, propagate_inbounds, state.params)
+    ir = CC.batch_inline!(todo, ir, linetable, propagate_inbounds)
     return ir
 end

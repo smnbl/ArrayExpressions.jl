@@ -17,7 +17,7 @@ end
 
 struct Input
     val::Any
-    type::Union{Core.Const, Type}
+    type::Union{Core.Const, Type, Core.PartialStruct}
     Input(val::GlobalRef) = new(val, Core.Const(resolve(val)))
     Input(val::Any) = new(val, Any)
     Input(val::Any, type) = new(val, type)
@@ -41,7 +41,7 @@ end
 struct ArrayExpr
     head::Any
     args::Vector{Any}
-    type::Union{Core.Const, Type}
+    type::Union{Core.Const, Type, Core.PartialStruct}
     ArrayExpr(head, args) = new(head, args, Any)
     ArrayExpr(head, args, type) = new(head, args, type)
 end

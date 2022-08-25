@@ -149,7 +149,8 @@ end
 
 # canonicalize broadcasts using classic term rewriting
 const canonicalize_broadcasting = @array_theory A B op begin
-    Base.materialize(A) == identity(A)
+    # does this need the identity?
+    Base.materialize(A) == A
     Base.broadcasted(op, A, B) == Base.broadcast(op, A, B)
     Base.broadcasted(op, A) == Base.broadcast(op, A)
     # TODO: generic in nr of arguments
@@ -221,54 +222,19 @@ function EGraphs.join(an::Type{MetadataAnalysis}, a, b)
     end
 end
 
-function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
-    op = operation(n)
-    if op isa Input
-        op = op.val
-    end
-
-    args = arguments(n)
-
-    # force broadcast canonicalization
-    if op == GlobalRef(Base, :broadcasted) || op == GlobalRef(Base, :materialize)
-        cost = +Inf
-    elseif op == GlobalRef(Main, :GemmWithEpilogue)
-        cost = 1
-    elseif op == GlobalRef(Main, :Gemm)
-        cost = 10
-    elseif op == GlobalRef(Main, :matmul)
-        cost = 1000
-    elseif op == :tuple
-        cost = 0
-    elseif op == GlobalRef(Base, :copyto!) || op == GlobalRef(Base, :_to_linear_index)
-        println("whoop")
-        cost = 1
-    else
-        cost = 1000
-    end
-
-    for id in args
-        eclass = g[id]
-        # if the child e-class has not yet been analyzed, return +Inf
-        !hasdata(eclass, an) && (cost += Inf; break)
-        cost += last(getdata(eclass, an))
-    end
-
-    # interesting illustration:
-    # TOOD: add debug levels?
-    #println(n)
-    #println(cost)
-
-    return cost
+# TODO: switch to sth easier to use (default cost function structure)
+struct CostFunction
+    operations::Dict{Function, Any}
+    default_cost::Any
+    CostFunction(operations, default_cost=1000) = new(operations, default_cost)
+    CostFunction() = new(Dict{Function, Any}(), 1000)
 end
-
-cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 1
 
 const theory = addition_properties ∪ multiplication_properties ∪ addition_properties ∪ canonicalize_broadcasting
 
 # TODO: should we lower dot & plus to map / reduce combos?
 # NOTE: as long as tensor_expr satisfies TermInterface, this will work
-function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
+function simplify(aro, tensor_expr)
     @assert tensor_expr.head == :output
 
     # remove :output wrapper
@@ -284,14 +250,14 @@ function simplify(tensor_expr; extra_rules=Metatheory.AbstractRule[])
 
     settermtype!(g, ArrayExpr)
 
-    theories = theory ∪ extra_rules
+    theories = theory ∪ aro.extra_rules
 
     # saturate graph
     report = saturate!(g, theories)
 
     # TODO: replace with own cost function
     # astsize: cost function that favors smaller expressions in the equivalence classes
-    ex = extract!(g, cost_function)
+    ex = extract!(g, aro.cost_function)
 
     return ArrayExpr(:output, [ex], type)
 end

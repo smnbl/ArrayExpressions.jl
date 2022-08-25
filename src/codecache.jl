@@ -93,6 +93,9 @@ end
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     # check the cache
     for ci in get!(wvc.cache.dict, mi, CodeInstance[])
+        # ignore worlds for now, assume new cache per compilation
+        return ci
+        #=
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             if ci.inferred isa Vector{UInt8}
                 ci.inferred = ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
@@ -101,6 +104,7 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
 
             return ci
         end
+        =#
     end
 
     return default
@@ -119,6 +123,7 @@ end
 
 ## codegen/inference integration
 
+# TODO actually: need to overwrite the GPUCompiler one, this one is not used atm
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 

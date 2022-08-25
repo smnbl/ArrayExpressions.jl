@@ -9,7 +9,7 @@ using GemmKernels
     return Gemm(A, B)
 end
 
-@inline function Gemm(A, B, C, alpha=1.0, beta=1.0)
+@inline function Gemm(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, alpha::T=T(1.0), beta::T=T(1.0)) where T
     # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
     return GemmWithEpilogue(A, B, C, identity, alpha, beta)
 end
@@ -18,49 +18,43 @@ end
     # TODO: support mixed precision?
     C = CuArray{T}(undef, (size(A, 1), size(B, 2)))
     # C = 1.0 * A*B + 0.0 * C
-    Gemm!(A, B, C, 1.0, 0.0)
-    return C
+    Gemm!(A, B, C, T(1.0), T(0.0))
 end
 
-@inline function Gemm!(A, B, C, alpha=1.0, beta=1.0)
+@inline function Gemm!(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, alpha=T(1.0), beta=T(1.0)) where T
     GemmWithEpilogue!(A, B, C, identity, alpha, beta)
 end
 
 # TODO:
 # add prologue?
-@inline function GemmWithEpilogue(A, B, C, transform, alpha=1.0, beta=1.0)
-    D = similar(C)
+@inline function GemmWithEpilogue(A::CuArray{T}, B::CuArray{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
+    D = similar(C, size(A, 1), size(B, 2))
     GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta)
-    return D
 end
 
 @inline function GemmWithAdd(A, B, C, d, alpha=1.0, beta=1.0)
     transform = epi(+, d)
-    D = similar(C)
+    D = similar(C, size(A, 1), size(B, 2))
     GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta)
-    return D
 end
 
-@inline function GemmWithEpilogue!(A, B, C, transform, alpha=1.0, beta=1.0)
+@inline function GemmWithEpilogue!(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
     GemmInterface(A, B, C, C, transform, alpha=alpha, beta=beta)
 end
 
 @inline function GemmBias(A, B, C, transform, bias)
-    D = similar(C)
+    D = similar(C, size(A, 1), size(B, 2))
     GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta, bias=bias)
-    return D
 end
 
-@inline function GemmInterface(A, B, C, D, transform; alpha=1.0, beta=1.0, bias=nothing)
+@inline function GemmInterface(A::CuArray{T}, B::CuArray{T}, C::CuArray{T, d}, D::CuArray{T}, transform; alpha::T=T(1.0), beta::T=T(1.0), bias=nothing) where {T, d}
     m = size(A, 1)
     k = size(A, 2)
     n = size(B, 2)
 
-    if m != size(C, 1) || n != size(C, 2) || k != size(B, 1)
-        throw(DimensionMismatch("Dimensions do not match, $(size(A)) x $(size(B)) = $(size(C))"))
-    end
-
-    println("$(alpha)*($(size(A)) x $(size(B))) + $(beta)*$(size(C)) = $(size(D))")
+    @assert m === size(D, 1)
+    @assert n === size(D, 2)
+    @assert m === size(C, 1)
 
     a_layout = GemmKernels.BLAS.global_layout(typeof(A), Val(false))
     b_layout = GemmKernels.BLAS.global_layout(typeof(B), Val(false))
@@ -77,22 +71,24 @@ end
 
             shared_a_layout = GemmKernels.BLAS.shared_layout_ab(typeof(A), Val(false)),
             shared_b_layout = GemmKernels.BLAS.shared_layout_ab(typeof(B), Val(false)),
-            shared_c_layout = GemmKernels.BLAS.shared_layout_cd(typeof(C), Val(false)),
-            shared_d_layout = GemmKernels.BLAS.shared_layout_cd(typeof(C), Val(false)),
+            shared_c_layout = GemmKernels.BLAS.shared_layout_cd(typeof(D), Val(false)),
+            shared_d_layout = GemmKernels.BLAS.shared_layout_cd(typeof(D), Val(false)),
 
             is_a_col_major = true,
-            is_b_col_major = true
+            is_b_col_major = true,
+            is_broadcast_c = d === 1,
                                 )
     GemmKernels.matmul(A, B, C, D, conf;
-                       # TODO: prologues, bias stuff
+                # TODO: prologues, bias stuff
 
-                       transform_shared_to_regs_a = Transform.Elementwise(x -> x * alpha),
-                       transform_shared_to_regs_c = Transform.Elementwise(x -> x * beta),
+                transform_shared_to_regs_a = Transform.Elementwise(x -> x * alpha),
+                transform_shared_to_regs_c = Transform.Elementwise(x -> x * beta),
 
-                       transform_regs_to_shared_d = Transform.Elementwise(transform),
-                       epilogue = if (bias != nothing) GemmKernels.Epilogue.Bias(pointer(bias)) else GemmKernels.Epilogue.Default() end,
-                       kernel = GemmKernels.BLAS.kernel(a_layout, b_layout)
-                      )
+                transform_regs_to_shared_d = Transform.Elementwise(transform),
+                epilogue = if (bias != nothing) GemmKernels.Epilogue.Bias(pointer(bias)) else GemmKernels.Epilogue.Default() end,
+                kernel = GemmKernels.Kernel.matmul_singlestage
+                )
+    return D
 end
 
 struct EpiL{F}
@@ -110,14 +106,13 @@ end
 (epi::EpiR)(el) = epi.func(epi.c, el)
 
 function Gemm(A::EClass, B::EClass, C::EClass)
-    println("3gemm")
-    return ArrayExpr(:call, [Gemm, A, B, C], Union{})
+    return ArrayExpr(:call, [Gemm, A, B, C])
 end
 
 function Gemm(A::EClass, B::EClass)
     # this will not be used tho, make it smarter?
     C = :(CuArray{T}(undef, (size(A, 1), size(B, 2))))
-    return ArrayExpr(:call, [Gemm, A, B, C, 1.0, 0.0], Union{})
+    return ArrayExpr(:call, [Gemm, A, B, C])
 end
 
 function Gemm!(A::EClass, B::EClass, C::EClass)
@@ -125,16 +120,15 @@ function Gemm!(A::EClass, B::EClass, C::EClass)
 end
 
 function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
-    println("matching gemm_with_epilogue: $epilogue")
-    return ArrayExpr(:call, [GemmWithEpilogue, A, B, C, epilogue], Union{})
+    return ArrayExpr(:call, [GemmWithEpilogue, A, B, C, epilogue])
 end
 
 function GemmWithAdd(A::EClass, B::EClass, C::EClass, d)
-    return ArrayExpr(:call, [GemmWithAdd, A, B, C, d], Union{})
+    return ArrayExpr(:call, [GemmWithAdd, A, B, C, d])
 end
 
 function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [GemmWithEpilogue!, A, B, C, epilogue], Union{})
+    return ArrayExpr(:call, [GemmWithEpilogue!, A, B, C, epilogue])
 end
 
 function GemmKernelsBias(A::EClass, B::EClass, C::EClass, bias)
@@ -156,10 +150,10 @@ const gemm_properties = @array_theory A B C op d epi begin
     # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
 
     #A * B => Gemm(A, B) where (istype(A, CuMatrix) && istype(B, CuMatrix))
-    A * B + C => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
+    A * B + C => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuArray))
 
     # temporary fix as matching with op doesn't seem to work (hashing issue?) -> look at EGraph.lookup
-    broadcast(op, A * B, C) => Gemm(A, B, C) where (istype(op, typeof(+)) && istype(A, CuArray) && istype(B, CuArray) && istype(C, CuArray))
+    broadcast(op, A * B, C) => Gemm(A, B, C) where (istype(op, typeof(+)) && istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuArray))
 
     # TODO: these ones are broken for now
     #broadcast(+, A * B, C) => Gemm(A, B, C) where (istype(A, CuMatrix) && istype(B, CuMatrix) && istype(C, CuMatrix))
@@ -168,8 +162,10 @@ const gemm_properties = @array_theory A B C op d epi begin
     # merge operations in prologue / epilogue
     # TODO: how to merge with prefix? prologue?
     # TODO: make sure epilogue is scalar
-    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, :(el -> op(el, $d))) where istype(d, Number)
-    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, :(el -> op($d, el))) where istype(d, Number)
+
+    # TODO: fix this ugly Lamda/App stuff by fixing array_rules
+    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d]))) where istype(d, Number)
+    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, :el]))) where istype(d, Number)
 
     # TODO: add support for these type of rules
     # C = Gemm(A, B, C) => Gemm!(A, B, C)
@@ -177,8 +173,8 @@ const gemm_properties = @array_theory A B C op d epi begin
 
     # fuse operations
     broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
-    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d])))
-    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])])))
+    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d]))) where istype(d, Number)
+    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])]))) where istype(d, Number)
     broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
 
     # TODO: add support for these type of rules
@@ -193,6 +189,56 @@ end
 # what determines how deep an intrinsic goes?
 const gpu_intrinsics = [Intrinsic(GlobalRef(Main, :*), 1, [1]),
                         Intrinsic(GlobalRef(Main, :+), 1, [1])]
+
+
+operations = Dict{Any, Any}()
+operations[Base.broadcasted] = +Inf
+operations[Base.materialize] = +Inf
+operations[GemmWithEpilogue] = 1
+operations[GemmWithEpilogue!] = 1
+operations[Gemm] = 10
+operations[Gemm!] = 10
+#operations[matmul] = 1000
+operations[tuple] = 0
+operations[:tuple] = 0
+
+# force replacement of broadcast
+operations[broadcast] = 2000
+
+# closures
+operations[:->] = 0
+operations[:block] = 0
+
+using Metatheory: AbstractAnalysis, operation, arguments, ENodeTerm, ENodeLiteral, EGraph
+
+function cost_function(n::ENodeTerm, g::EGraph, an::Type{<:AbstractAnalysis})
+    op = operation(n)
+    if op isa Input
+        if op.type isa Core.Const
+            op = op.type.val
+        else
+            op = op.val
+        end
+    end
+
+
+    cost = get(operations, op, 1000)
+
+    for id in arguments(n)
+        eclass = g[id]
+        # if the child e-class has not yet been analyzed, return +Inf
+        !hasdata(eclass, an) && (cost += Inf; break)
+        cost += last(getdata(eclass, an))
+    end
+
+    # interesting illustration:
+    # TOOD: add debug levels?
+
+    return cost
+end
+
+cost_function(n::ENodeLiteral, g::EGraph, an::Type{<:AbstractAnalysis}) = 100
+
 
 # TODO: GemmKernels.matmul intrinsic
 

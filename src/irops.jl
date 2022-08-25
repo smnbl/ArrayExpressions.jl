@@ -10,18 +10,19 @@ using Core.Compiler: OldSSAValue, NewSSAValue
 # TODO: handle phi nodes -> atm: stop at phi nodes (diverging control flow)
 #       -> look at implementing gated SSA, for full body analysis?
 # visited: set of already visited notes
-function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=0)
+function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=0, start_bb=1)
     inst = ir.stmts[loc.id][:inst]
     # might include const information
     type = ir.stmts[loc.id][:type]
 
+    current_bb = CC.block_for_inst(ir.cfg, length(ir.stmts))
+
     # inference boundaries
-    pure = !(Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter) || Base.isexpr(inst, :foreigncall))
+    boundary = Base.isexpr(inst, :new) || Base.isexpr(inst, :static_parameter) || Base.isexpr(inst, :foreigncall) || current_bb != start_bb
 
     # doesn't work that well atm
     # pure = ir.stmts[loc.id][:flag] & CC.IR_FLAG_EFFECT_FREE != 0
-    # if statement is not pure we can not extract the instruction
-    if (!pure)
+    if (boundary)
         return visited, Input(loc, type), latest_ref
     end
 
@@ -35,14 +36,16 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=
 
             # TODO: v1.8 already has a version that works on IRCode, without explicitly passing sptypes & argtypes
             # might include Const information
-            arg_type = CC.argextype(arg, ir)
+            #arg_type = CC.argextype(arg, ir)
+            arg_type = CC.argextype(arg, ir, ir.sptypes)
+
 
             if arg isa SSAValue
                 latest_ref = max(latest_ref, loc.id)
 
                 # TODO: stop at functions with side effects?
                 # TODO: look at Julia's native purity modeling infra (part of Julia v1.8): https://github.com/JuliaLang/julia/pull/43852
-                visited, arexpr, latest_ref = _extract_slice!(ir, arg, visited=visited, latest_ref=latest_ref)
+                visited, arexpr, latest_ref = _extract_slice!(ir, arg, visited=visited, latest_ref=latest_ref, start_bb=start_bb)
 
                 push!(args_op, arexpr)
             elseif arg isa Output
@@ -56,7 +59,7 @@ function _extract_slice!(ir::IRCode, loc::SSAValue; visited=Int64[], latest_ref=
         latest_ref = max(latest_ref, loc.id)
 
         push!(visited, loc.id)
-        return _extract_slice!(ir, inst, visited=visited, latest_ref=latest_ref)
+        return _extract_slice!(ir, inst, visited=visited, latest_ref=latest_ref, start_bb=start_bb)
 
     elseif inst isa CC.GlobalRef
         # keep track of the visited statements (kind off redundant as they will be marked for deletion (nothing))
@@ -83,12 +86,12 @@ function replace!(ir::IRCode, visited, todo_opt::Dict, output_map)
     let compact = CC.IncrementalCompact(ir, true)
         # insert tuple calls right before the locations
         for (loc, (call_expr, type, getfield_locs)) in todo_opt
-            ssa_tuple = CC.insert_node!(compact, SSAValue(loc.id), CC.non_effect_free(CC.NewInstruction(call_expr, type)))
+            ssa_tuple = CC.insert_node!(compact, SSAValue(loc.id), CC.non_effect_free(CC.NewInstruction(call_expr, Tuple{type...})))
             tuple_loc[loc] = ssa_tuple
 
             for (field_index, getfield_ssa) in enumerate(getfield_locs)
                 expr = Expr(:call, GlobalRef(Base, :getfield), ssa_tuple, field_index)
-                new_ssa = CC.insert_node!(compact, ssa_tuple, CC.non_effect_free(CC.NewInstruction(expr, Any)), true)
+                new_ssa = CC.insert_node!(compact, ssa_tuple, CC.non_effect_free(CC.NewInstruction(expr, type[field_index])), true)
                 rename[getfield_ssa.id] = new_ssa
                 CC.setindex!(compact, new_ssa, getfield_ssa.id)
                 push!(dont_delete, getfield_ssa.id)
@@ -117,6 +120,7 @@ function replace!(ir::IRCode, visited, todo_opt::Dict, output_map)
                 # TODO: this is broken
                 # intrinsics will have used_ssas < 0
                 if compact.used_ssas[idx] <= 0
+                    # TODO remove this
                     CC.setindex!(compact.result[idx], nothing, :inst)
                 end
             end
@@ -209,7 +213,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # extract & optimize array expression that returns
         # TODO: work with basic blocks and CFG?
 
-        visited, arexpr, latest_ref = _extract_slice!(ir, loc, visited=visited, latest_ref=latest_ref)
+        visited, arexpr, latest_ref = _extract_slice!(ir, loc, visited=visited, latest_ref=latest_ref, start_bb=current_bb)
 
         # always insert at the tuple at the location furthest down
         if isnothing(insert_loc)
@@ -229,7 +233,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         return ir
     end
 
-    todo_opt = Dict{OldSSAValue, Tuple{Expr, Type, Any}}()
+    todo_opt = Dict{OldSSAValue, Tuple{Expr, Vector, Any}}()
 
     # visited used to clean up
     visited_clean = Int64[]
@@ -241,14 +245,14 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # wrap arexpr in output function
         # this is to make expressions that only consist of 1 SSAValue, (e.g. arexpr = %4)
         # equivalent to expressions that only contain SSAValues inside its arguments
-        tuple_type = Tuple{map(x -> x.type, values(exprs))...}
-        tuple_expr = ArrayExpr(:tuple, collect(values(exprs)), tuple_type)
+        tuple_type_vec = map(x -> x.type, values(exprs))
+        tuple_expr = ArrayExpr(:tuple, collect(values(exprs)), Tuple{tuple_type_vec...})
         output = ArrayExpr(:output, [tuple_expr], tuple_expr.type)
         #println(output)
         #println(">>>")
 
         # 3. jointly optimize output tuple
-        simplified = simplify(output, extra_rules=aro.extra_rules)
+        simplified = simplify(aro, output)
         #println("simplified = $op")
         #println("---")
 
@@ -287,13 +291,12 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
             arguments[idx] = val
         end
 
-        # TODO: should we use invokelatest here?
+        # TODO: should we use invokelatest -> lowered to _call_latest
         # TODO: try ... catch ... pattern for faster call invocations
-        # doesn't seem to work with opaque closures :(
-        call_expr =  Expr(:call, oc, arguments...)
+        call_expr =  Expr(:call, GlobalRef(Core, :_call_latest), oc, arguments...)
 
         union!(visited_clean, item.visited)
-        push!(todo_opt, Pair(loc, (call_expr, tuple_type, collect(keys(exprs)))))
+        push!(todo_opt, Pair(loc, (call_expr, tuple_type_vec, collect(keys(exprs)))))
     end
 
     # TODO: add output map
@@ -309,11 +312,36 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     return ir
 end
 
+# From Zygote.jl
+@static if VERSION < v"1.8.0-DEV.267"
+    function replace_code_newstyle!(ci, ir, n_argtypes)
+        return Core.Compiler.replace_code_newstyle!(ci, ir, n_argtypes-1)
+    end
+else
+    using Core.Compiler: replace_code_newstyle!
+end
+
+function update!(ci::CodeInfo, ir::Core.Compiler.IRCode)
+    replace_code_newstyle!(ci, ir, length(ir.argtypes))
+    ci.inferred = false
+    ci.ssavaluetypes = length(ci.code)
+    slots!(ci)
+    fill!(ci.slotflags, 0)
+    return ci
+end
+
 function (aro::ArrOptimPass)(code_info::CodeInfo, method_instance::MethodInstance)
     ir = CC.inflate_ir(code_info, method_instance)
 
     ir = aro(ir, method_instance.def.module)
+    #@Base.show ("before_sroa", ir)
+    ir = CC.getfield_elim_pass!(ir)
+    #@Base.show ir.new_nodes
+    #@Base.show ("after_sroa", ir)
+    ir = CC.adce_pass!(ir)
+    ir = CC.type_lift_pass!(ir)
+    ir = CC.compact!(ir)
 
     println("replacing code newstyle")
-    CC.replace_code_newstyle!(code_info, ir, Int64(method_instance.def.nargs))
+    update!(ci, ir)
  end
