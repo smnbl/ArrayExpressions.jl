@@ -81,6 +81,11 @@ function bench_conv_single(xs, n_samples=100)
     c1 = similar(c)
     c2 = similar(c)
 
+    # test correctnes
+    CUDA.@sync Base.invokelatest(f_normal, c1, xs)
+    CUDA.@sync Base.invokelatest(f_opt_gemm, c2, xs)
+    @assert isapprox(Array(c1), Array(c2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
+
     #println(f_opt_wo(c1, xs))
 
     c1 = similar(xs, (nclasses, size(xs)[end]))
@@ -106,7 +111,6 @@ function bench_conv_single(xs, n_samples=100)
     println(after)
     
     #println(Array(c1) - Array(c2))
-    #@assert isapprox(Array(c1), Array(c2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
 
     #after = []
     #for i = 1:n_samples

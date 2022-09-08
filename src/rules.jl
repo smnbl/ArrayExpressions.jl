@@ -205,13 +205,11 @@ function istype(X::EClass, type::Type)
 
     # hack to handle broadcast results
     if type <: CuMatrix && ty <: Base.Broadcast.Broadcasted{CUDA.CuArrayStyle{2}}
-        println(ty)
         return true
     end
 
     # hack to handle broadcast results
     if type <: CuArray && ty <: Base.Broadcast.Broadcasted{CUDA.CuArrayStyle{1}}
-        println(ty)
         return true
     end
     return ty <: type

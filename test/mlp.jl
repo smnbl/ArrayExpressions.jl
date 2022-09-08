@@ -44,9 +44,9 @@ c = similar(xs, (nclasses, size(xs)[end]))
 const mlp_chain = fmap(cu, mlp(imgsize=size(xs)[1:end-1], nclasses=nclasses))
 
 @array_opt function f(c, x)
-    x = lenet_chain.layers[1](x)
-    x = lenet_chain.layers[2](x)
-    x = lenet_chain.layers[3](x)
+    x = mlp_chain.layers[1](x)
+    x = mlp_chain.layers[2](x)
+    x = mlp_chain.layers[3](x)
     copyto!(c, x)
     nothing
 end
@@ -65,6 +65,11 @@ function bench_mlp_single(xs, n_samples=100)
     println("warming up")
     c1 = similar(c)
     c2 = similar(c)
+
+    # test correctnes
+    CUDA.@sync Base.invokelatest(f_normal, c1, xs)
+    CUDA.@sync Base.invokelatest(f_opt_gemm, c2, xs)
+    @assert isapprox(Array(c1), Array(c2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
 
     #println(f_opt_wo(c1, xs))
 
