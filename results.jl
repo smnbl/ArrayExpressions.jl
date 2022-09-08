@@ -1,10 +1,19 @@
 using Statistics
+using BenchmarkTools
 using JLD2
 
 # process collected measurements
 
 benchs = load("benchmarks.jld2")
+for (key, value) in benchs
+    println("=============================================")
+    println(key)
+    Base.show(stdout, MIME"text/plain"(), value)
+    println()
+    println("=============================================")
+end
 
+#=
 for s in [1024]
     p(d) = round(1000*d, digits = 4)
     m = benchs["lenet before $s"]
@@ -13,6 +22,7 @@ for s in [1024]
     after = "$(p(mean(a))) \$\\pm\$$(p(std(a)))"
     println("$(s)x$s & $before & $after")
 end
+=#
 
 #=
 println("mlp results:")

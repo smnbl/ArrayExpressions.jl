@@ -66,6 +66,8 @@ function bench_mlp_single(xs, n_samples=100)
     c1 = similar(c)
     c2 = similar(c)
 
+    f(c, xs)
+
     # test correctnes
     CUDA.@sync Base.invokelatest(f_normal, c1, xs)
     CUDA.@sync Base.invokelatest(f_opt_gemm, c2, xs)
@@ -81,7 +83,6 @@ function bench_mlp_single(xs, n_samples=100)
 
     
     before = @benchmark CUDA.@sync Base.invokelatest($f_normal, $c1, $xs)
-    println(before)
 
     #before = []
     #for i = 1:n_samples
@@ -93,7 +94,6 @@ function bench_mlp_single(xs, n_samples=100)
     CUDA.@sync Base.invokelatest(f_opt_gemm, c2, xs)
 
     after = @benchmark CUDA.@sync Base.invokelatest($f_opt_gemm, $c2, $xs)
-    println(after)
     
     #println(Array(c1) - Array(c2))
     #@assert isapprox(Array(c1), Array(c2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
