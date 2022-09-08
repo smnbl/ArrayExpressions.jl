@@ -127,10 +127,10 @@ function optimize!(job::CompilerJob{ArrayNativeCompilerTarget}, mod::LLVM.Module
         # the Julia GC lowering pass also has some clean-up that is required
 
         # SIMON: this seems to error
-        # late_lower_gc_frame!(pm)
-        #if uses_julia_runtime(job)
-            #final_lower_gc!(pm)
-        #end
+        late_lower_gc_frame!(pm)
+        if uses_julia_runtime(job)
+            final_lower_gc!(pm)
+        end
 
         remove_ni!(pm)
         remove_julia_addrspaces!(pm)
@@ -528,10 +528,11 @@ module LazyCodegen
         end
     end
 
-    function call_delayed(aro, f::F, args...) where F
+    @inline function call_delayed(aro, f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
         ptr = deferred_codegen(aro, f, tt)
+
 
         quote
             LazyCodegen.abi_call($ptr, $rt, $tt, $f, ($args)...)

@@ -15,31 +15,44 @@ const AA = ArrayAbstractions
 include("compile.jl")
 include("gpu/gpu_rules.jl")
 
-function LeNet5(; imgsize=(28,28,1), nclasses=10) 
-    out_conv_size = (imgsize[1]÷4 - 3, imgsize[2]÷4 - 3, 16)
-    
+function mlp(; imgsize=(28,28,1), nclasses=10) 
     return Chain(
-            Conv((5, 5), imgsize[end]=>6, relu),
-            MaxPool((2, 2)),
-            Conv((5, 5), 6=>16, relu),
-            MaxPool((2, 2)),
-            flatten,
-            # elementwise operations?
-            # added as a test
-            Dense(prod(out_conv_size), 120, relu), 
-            Dense(120, 84, relu), 
-            Dense(84, nclasses)
-    )
+                 flatten,
+                 Dense(prod(imgsize), 32, relu),
+                 Dense(32, nclasses))
 end
 
 xs_f(;img_size=32) = CuArray(rand(Float32, img_size, img_size, 1, 50))
 xs = xs_f()
 
-rules = AA.canonicalize_broadcasting ∪ gemm_properties
+# Float16 version of Flux.glorot_uniform, necessary as otherwirse the weight matrices get initialized to Float32 (GemmKernels.jl doesn't support mixed precision gemm atm)
+function glorot_uniform_16(rng::AbstractRNG, dims::Integer...; gain::Real=1)
+  scale = Float16(gain) * Float16(sqrt(24.0f0 / sum(nfan(dims...))))
+  (rand(rng, Float16, dims...) .- Float16(0.5f0)) .* scale
+end
+glorot_uniform_16(dims::Integer...; kw...) = glorot_uniform_16(rng_from_array(), dims...; kw...)
+glorot_uniform_16(rng::AbstractRNG=rng_from_array(); init_kwargs...) = (dims...; kwargs...) -> glorot_uniform_16(rng, dims...; init_kwargs..., kwargs...)
+
+function replace_conv_bias_act(f, a, x, w, cdims, b)
+    println("replacing conv_bias_act...")
+
+    return ArrayExpr(:call, [GlobalRef(NNlib, :conv_bias_act), x, w, cdims, b, a])
+end
+
+flux_conv_fusing_rules = @array_theory a f x w cdims b begin
+    # fix to keep in ir
+    Flux.conv(x, w, cdims) == Flux.conv(x, w, cdims)
+    # TODO fix this with current graphs (Flux.conv seeems different)
+    broadcast(a, broadcast(f, Flux.conv(x, w, cdims), b)) => replace_conv_bias_act(f, a, x, w, cdims, b) where istype(f, typeof(Flux.:+))
+end
+
+rules = AA.canonicalize_broadcasting ∪ gemm_properties ∪ flux_conv_fusing_rules
 
 nclasses = 10
 
-const chain = fmap(cu, LeNet5(imgsize=size(xs)[1:end-1], nclasses=nclasses))
+const chain = fmap(cu, mlp(imgsize=size(xs)[1:end-1], nclasses=nclasses))
+
+println(chain)
 
 args = [xs]
 argtype = Tuple{typeof.(args)...}
@@ -49,13 +62,16 @@ c = similar(xs, (nclasses, size(xs)[end]))
 @array_opt function f(c, x)
     x = chain(x)
     copyto!(c, x)
-    nothing
+    return nothing
 end
 
+println("warming up")
 @CUDA.sync f(c, xs)
 
+println("optimizing")
 #f_opt_wo(c, xs) = compile_deferred(f, (c, xs), cost_function)
 @eval f_opt_gemm(c, xs) = $(compile_deferred(f, (c, xs), cost_function; extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
+@eval f_opt_gemm2(c, xs) = $(compile_deferred(f, (c, xs), cost_function; extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
 #ci = compile_expression(f, argtype, [:xs], cost_function; extra_rules=rules)
 #@generated f_opt(xs) = return ci
 
@@ -67,7 +83,6 @@ c1 = similar(c)
 c2 = similar(c)
 
 #println(f_opt_wo(c1, xs))
-println(f_opt_gemm(c2, xs))
 
 # @test isapprox(Array(c1), Array(c2), rtol=1.0, nans=true)
 
@@ -84,17 +99,14 @@ println("flux before:")
 # benchs["flux_before"] = @time CUDA.@sync f($c2, $(xs_f()))
 for img_size = [64, 128, 512, 1024]
     let x = xs_f(img_size = img_size)
-        println(img_size)
-        # warmup
-        @time CUDA.@sync f(c1, x)
-        @time CUDA.@sync f(c1, x)
-
         samples = []
+
+        CUDA.@sync f(c1, x)
         for i = 1:10
             append!(samples, @elapsed CUDA.@sync f(c1, x))
         end
 
-        benchs["lenet before $img_size"] = samples
+        benchs["mlp before $img_size"] = samples
     end
 end
 
@@ -102,19 +114,13 @@ println("flux after gemm:")
 #CUDA.@sync f_opt_gemm(c1, xs)
 for img_size = [64, 128, 512, 1024]
     let x = xs_f(img_size = img_size)
-
-        println(img_size)
-
         CUDA.@sync f_opt_gemm(c1, x)
-        
-        #@assert isapprox(Array(c1), Array(c2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
-
         samples = []
         for i = 1:10
             append!(samples, @elapsed CUDA.@sync f_opt_gemm(c1, x))
         end
 
-        benchs["lenet after $img_size"] = samples
+        benchs["mlp after $img_size"] = samples
     end
 end
 
@@ -127,3 +133,4 @@ CUDA.@sync f_opt_gemm_cba(c1, xs)
 @benchmark CUDA.@sync f_opt_gemm_cba(c1, xs)
 benchs["flux_after_gemm+cba"]
 =#
+

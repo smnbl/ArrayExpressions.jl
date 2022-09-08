@@ -137,13 +137,26 @@ struct TodoItem
     visited::Vector{Int64}
 end
 
+const debug = false
+macro if_debug(expr)
+    return quote
+        if debug
+            $(esc(expr))
+        else
+            nothing
+        end
+    end
+end
+
 # Array optimizations pass
 function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
-    open("irdump_before.ir", "w") do io
+    @if_debug begin
+        open("irdump_before.ir", "w") do io
            print(io, ir)
+        end
     end
 
-    expression_log = open("expression_log", "w")
+    @if_debug expression_log = open("expression_log", "w")
 
     stmts = ir.stmts
     visited = Int64[]
@@ -174,6 +187,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     # latest referenced SSAValue
     latest_ref = 0
 
+    @if_debug println("collecting expressions")
     # 1. collect expressions
     for idx in length(stmts):-1:1
         # switched to a new expression when hitting a basic block / crossing the latest ref
@@ -230,6 +244,7 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
     # if nothing found, just return ir
     # TODO: add outputmap
     if (isempty(todo)) # TODO: all(map(el -> el isa Input, exprs)))
+        @if_debug close(expressions_log)
         return ir
     end
 
@@ -256,12 +271,12 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         #println("simplified = $op")
         #println("---")
 
-        println(expression_log, "before: $output")
-        println(expression_log, "after: $simplified")
+        @if_debug println(expression_log, "before: $output")
+        @if_debug println(expression_log, "after: $simplified")
 
         # TODO: broken as resp visited nodes are not removed
         if fingerprint(output) == fingerprint(simplified)
-            println(expression_log, "skipping injection")
+            @if_debug println(expression_log, "skipping injection")
             # trees most likely stayed the same
             continue
         end
@@ -269,8 +284,8 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
         # 4. insert optimized expression back
         expr, input_map = codegen_expr!(simplified.args[1], length(ir.argtypes))
 
-        println(expression_log, "compiling expression:")
-        println(expression_log, expr)
+        @if_debug println(expression_log, "compiling expression:")
+        @if_debug println(expression_log, expr)
 
         # note: world age changes here
         # TODO: investigate if problem, read world age paper
@@ -301,12 +316,16 @@ function (aro::ArrOptimPass)(ir::IRCode, mod::Module)
 
     # TODO: add output map
     # Have to set output type to (Any, ...), otherwise segmentation faults -> TODO: investigate, seems to be the case if there is a mismatch in the return types
+    @if_debug println("replacing...")
     ir = replace!(ir, visited_clean, todo_opt, nothing)
 
-    close(expression_log)
+    
+    @if_debug close(expression_log)
 
-    open("irdump.ir", "w") do io
-           print(io, ir)
+    @if_debug begin
+        open("irdump.ir", "w") do io
+            print(io, ir)
+        end
     end
 
     return ir

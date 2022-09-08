@@ -1,6 +1,8 @@
 using ArrayAbstractions
 using Core.Compiler
 
+using JLD2
+
 using CUDA
 using GemmKernels
 using BenchmarkTools
@@ -14,17 +16,129 @@ include("./gpu_rules.jl")
 
 const (M, N, K) = (512, 512, 512)
 
-eltype = CuArray
+cache = ArrayAbstractions.CodeCache()
 
-# intergration tests
-
-macro gemmcompile(target, func, args, argtype)
-println(args)
-quote
-    $(esc(target))($(eval(args)...)) = $(compile_with_gpucompiler(func, argtype, args; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting, intrinsics=gpu_intrinsics))
-end
+function a()
+    CuArray(rand(Float32, (M, K)))
 end
 
+function b()
+    CuArray(rand(Float32, (K, N)))
+end
+
+function c()
+    CuArray(rand(Float32, (M, N)))
+end
+
+function d()
+    CuArray(rand(Float32, (M, N)))
+end
+
+# simple gemm design example
+function bench(before, a, b, c, d)
+    A = a()
+    B = b()
+    C = c()
+    D1 = d()
+    D2 = d()
+
+    @CUDA.sync before(D1, A, B, C)
+
+    # race condition loading the CUDA libraries?
+    println("$(Array(D1))")
+
+    eltype = CuArray
+    args = [A, B, C]
+    argtype = Tuple{typeof.(args)...}
+
+    # TODO: push array opt?
+    @eval after(D2, A, B, C) = $(compile_deferred(before, (D2, A, B, C), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
+
+    Base.invokelatest(after, D2, A, B, C)
+
+    # warmup & check
+    # @assert isapprox(Array(D1), Array(D2), rtol=1.0, nans=true)
+
+    println("benchmarking $before")
+    println("epi: before:")
+    before_bench = @benchmark CUDA.@sync Base.invokelatest($before, $(d()), $(a()), $(b()), $(c()))
+
+    println("epi: after")
+    after_bench = @benchmark CUDA.@sync Base.invokelatest($after, $(d()), $(a()), $(b()), $(c()))
+
+    return before_bench, after_bench
+end
+
+#################################################################################################################################
+@array_opt function gemm_design_example(D, A, B, C)
+    q = Float32(0.1)
+    T = A * B
+    T += C
+    copyto!(D, T .+ q)
+    nothing
+end
+
+@array_opt function gemm_design_example_man_opt(A, B, C)
+    copyto!(C, GemmWithEpilogue(A, B, C, el -> el + Float32(0.1)))
+    nothing
+end
+
+@array_opt function gemm_design_example_man_gemm(A, B, C)
+    T = Gemm(A, B, C)
+    T .+ Float32(0.1)
+    copyto!(C, T)
+    nothing
+end
+
+@array_opt function gemm_design_example_man_transform(A, B, C)
+    copyto!(C, GemmWithEpilogue(A, B, C, el -> el + Float32(0.1)))
+    nothing
+end
+
+@array_opt function gemm_design_example_man_all(A, B, C)
+    GemmWithEpilogue!(A, B, C, el -> el + Float32(0.1))
+    nothing
+end
+
+@array_opt function gemm_design_complex(D, A, B, C)
+    q = Float32(0.1)
+    T = A * B
+    T += C
+    copyto!(D, T .^ 2 .^ 2 .^ 2 .^ 2)
+    nothing
+end
+
+###################################################################################################################################
+A = a()
+B = b()
+C = c()
+C2 = c()
+C1 = c()
+# broadcasted
+function gemm_broadcasted()
+    D1 = similar(C)
+    D2 = similar(C)
+    gemm!(D1, A, B, C2)
+    @eval gemm_opt!(D, A, B, C2) = $(compile_deferred(gemm!, (D2, A, B, C2), cost_function, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
+
+    Base.invokelatest(gemm_opt!, D2, A, B, C2)
+
+    # warmup & check
+    @assert isapprox(Array(D1), Array(D2), rtol=sqrt(eps(Float16)), nans=true)
+
+    println("benchmarking gemm_broadcast replacement")
+    println("epi: before:")
+    CUDA.@sync gemm!(D1, A, B, C2) # warmup
+    before = @elapsed CUDA.@sync gemm!(D1, A, B, C2)
+
+    println("epi: after")
+    CUDA.@sync Base.invokelatest(gemm_opt!, D2, A, B, C2) # warmup
+    after = @elapsed CUDA.@sync Base.invokelatest(gemm_opt!, (D2, A, B, C2))
+
+    return before, after
+end
+
+################################################################################################################################
 function subcall(A, B, C)
     return broadcast(+, subsubcall(A, B), C)
 end
@@ -39,76 +153,29 @@ end
     return nothing
 end
 
-function gemm_multi(A, B, C)
-    T = A * B
-    T += C
-    T = element_kernel(T)
+function gemm_gemm_replacement()
+    D1 = similar(C)
+    D2 = similar(C)
+    gemm!(D1, A, B, C)
+    @eval gemm_opt!(D, A, B, C) = $(compile_deferred(gemm!, (D2, A, B, C), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
 
-    X = adjoint(B) * adjoint(A) + adjoint(C)
+    gemm_opt!(D2, A, B, C)
 
-    return T, X
+    # warmup & check
+    @assert isapprox(Array(D1), Array(D2), rtol=1.0, nans=true)
+
+    println("benchmarking gemm replacement")
+    println("epi: before:")
+    CUDA.@sync gemm!(D1, A, B, C) # warmup
+    before = @benchmark CUDA.@sync gemm!(D1, A, B, C)
+
+    println("epi: after")
+    CUDA.@sync gemm_opt!(D2, A, B, C) # warmup
+    after = @benchmark CUDA.@sync gemm_opt!(D2, A, B, C)
+
+    return befor, after
 end
 
-A = CuArray(rand(Float32, (M, K)))
-B = CuArray(rand(Float32, (K, N)))
-C = CuArray(rand(Float32, (M, N)))
-C2 = CuArray(rand(Float32, N))
-
-cache = ArrayAbstractions.CodeCache()
-
-args = [A, B, C]
-argtype = Tuple{typeof.(args)...}
-
-# demo function
-# ci = compile_expression(gemm, argtype, [:A, :B, :C], cost_function; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting)
-# @generated gemm_opt(A, B, C) = ci
-
-#@eval gemm_opt(A, B, C) = $(compile_with_gpucompiler(gemm, argtype, [:A, :B, :C], cost_function; eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
-#gemm_opt(A, B, C)
-
-D1 = similar(C)
-D2 = similar(C)
-gemm!(D1, A, B, C2)
-@eval gemm_opt!(D, A, B, C2) = $(compile_deferred(gemm!, (D2, A, B, C2), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
-
-gemm_opt!(D2, A, B, C2)
-
-# warmup & check
-@test isapprox(Array(D1), Array(D2), rtol=1.0, nans=true)
-
-println("benchmarking gemm_broadcast replacement")
-println("epi: before:")
-CUDA.@sync gemm!(D1, A, B, C2) # warmup
-bench = @benchmark CUDA.@sync gemm!(D1, A, B, C2)
-println(bench)
-
-println("epi: after")
-CUDA.@sync gemm_opt!(D2, A, B, C2) # warmup
-bench = @benchmark CUDA.@sync gemm_opt!(D2, A, B, C2)
-println(bench)
-
-################################################################################################################################
-
-D1 = similar(C)
-D2 = similar(C)
-gemm!(D1, A, B, C)
-@eval gemm_opt!(D, A, B, C) = $(compile_deferred(gemm!, (D2, A, B, C), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
-
-gemm_opt!(D2, A, B, C)
-
-# warmup & check
-@test isapprox(Array(D1), Array(D2), rtol=1.0, nans=true)
-
-println("benchmarking gemm replacement")
-println("epi: before:")
-CUDA.@sync gemm!(D1, A, B, C) # warmup
-bench = @benchmark CUDA.@sync gemm!(D1, A, B, C)
-println(bench)
-
-println("epi: after")
-CUDA.@sync gemm_opt!(D2, A, B, C) # warmup
-bench = @benchmark CUDA.@sync gemm_opt!(D2, A, B, C)
-println(bench)
 
 #################################################################################################################################
 
@@ -134,25 +201,52 @@ end
     return nothing
 end
 
-gemm_fusion(A, B, C)
+function gemm_scalar_fusion()
+    gemm_fusion(A, B, C)
 
-@eval gemm_fusion_opt(A, B, C) = $(compile_deferred(gemm_fusion, (A, B, C), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
+    @eval gemm_fusion_opt(A, B, C) = $(compile_deferred(gemm_fusion, (A, B, C), cost_function, eltype=eltype, extra_rules=gemm_properties ∪ AA.canonicalize_broadcasting))
 
-CUDA.@sync gemm_fusion(A, B, C) # warmup
-CUDA.@sync gemm_fusion_opt(A, B, C) # warmup
+    CUDA.@sync gemm_fusion(A, B, C) # warmup
+    CUDA.@sync gemm_fusion_opt(A, B, C) # warmup
 
-println("benchmarking fusion_scalar_add")
-println("epi: before")
-bench = @benchmark CUDA.@sync gemm_fusion(A, B, C)
-println("$bench")
+    println("benchmarking fusion_scalar_add")
+    println("epi: before")
+    before = @benchmark CUDA.@sync gemm_fusion(A, B, C)
 
-println("epi: after")
-bench =  @benchmark CUDA.@sync gemm_fusion_opt(A, B, C)
-println("$bench")
+    println("epi: after")
+    after =  @benchmark CUDA.@sync gemm_fusion_opt(A, B, C)
+
+    return before, after
+end
 
 #################################################################################################################################
 
+
+#benchs = load("benchmakrs.jld2")
+
+# before = @benchmark CUDA.@sync gemm_design_example($(a()), $(b()), $(c()))
+# gemm =  @benchmark CUDA.@sync gemm_design_example_man_opt($(a()), $(b()), $(c()))
+# transform =  @benchmark CUDA.@sync gemm_design_example_man_transform($(a()), $(b()), $(c()))
+# all =  @benchmark CUDA.@sync gemm_design_example_man_all($(a()), $(b()), $(c()))
+
+# bench(gemm_design_example, a, b, c, d)
+# bench(gemm_design_example, a, b, c, d)
+
+# benchs["design_simple"] = before, gemm, transform, all
+# benchs["design_complex"] = bench(gemm_design_complex, a, b, c, d)
+# benchs["gemm_fusion"] = bench(gemm_fusion, a, b, c, d)
+
 #=
+function gemm_multi(A, B, C)
+    T = A * B
+    T += C
+    T = element_kernel(T)
+
+    X = adjoint(B) * adjoint(A) + adjoint(C)
+
+    return T, X
+end
+
 @gemmcompile gemm_multi_opt gemm_multi [:A, :B, :C] argtype
 
 a1, a2 = gemm_multi_opt(A, B, C)

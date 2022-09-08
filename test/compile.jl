@@ -45,7 +45,7 @@ end
 
 function compile_deferred(func, args, cost_function; eltype=AbstractArray, extra_rules=[], intrinsics=[])
     aro = ArrOptimPass(eltype, cost_function, extra_rules=extra_rules, intrinsics=intrinsics)
-    return call_delayed(aro, func, args...)
+    call_delayed(aro, func, args...)
 end
 
 @static if VERSION < v"1.8.0-DEV.267"

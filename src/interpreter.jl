@@ -1,4 +1,5 @@
 using Core.Compiler
+using Dates
 
 using Core.Compiler: InferenceParams,
     OptimizationParams,
@@ -175,8 +176,11 @@ function run_passes(ci::CodeInfo, nargs::Int, sv::OptimizationState, aro)
     perform_array_opt = CC._any(@nospecialize(x) -> CC.isexpr(x, :meta) && x.args[1] === :array_opt, ir.meta)   # perform optimization
     if (perform_array_opt)
         println("performing array opt pass")
-        ir = aro(ir, ci.parent.def.module)
-        println("array opt pass done!")
+        #before = Dates.now()
+        time = @elapsed ir = aro(ir, ci.parent.def.module)
+        #after = Dates.now() - before
+        println("array opt pass done $time")
+        # println("array opt pass done: took $after!")
     end
     ir = CC.compact!(ir)
 

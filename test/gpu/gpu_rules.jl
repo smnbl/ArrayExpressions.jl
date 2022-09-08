@@ -11,23 +11,23 @@ end
 
 @inline function Gemm(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, alpha::T=T(1.0), beta::T=T(1.0)) where T
     # return LinearAlgebra.mul!(C, A, B, 1.0, 1.0)
-    return GemmWithEpilogue(A, B, C, identity, alpha, beta)
+    return GemmWithTransform(A, B, C, identity, alpha, beta)
 end
 
 @inline function Gemm(A::CuMatrix{T}, B::CuMatrix{T}) where T
     # TODO: support mixed precision?
     C = CuArray{T}(undef, (size(A, 1), size(B, 2)))
     # C = 1.0 * A*B + 0.0 * C
-    Gemm!(A, B, C, T(1.0), T(0.0))
+    Gemm!(C, A, B, C, T(1.0), T(0.0))
 end
 
-@inline function Gemm!(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, alpha=T(1.0), beta=T(1.0)) where T
-    GemmWithEpilogue!(A, B, C, identity, alpha, beta)
+@inline function Gemm!(D, A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, alpha=T(1.0), beta=T(1.0)) where T
+    GemmWithTransform!(D, A, B, C, identity, alpha, beta)
 end
 
 # TODO:
 # add prologue?
-@inline function GemmWithEpilogue(A::CuArray{T}, B::CuArray{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
+@inline function GemmWithTransform(A::CuArray{T}, B::CuArray{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
     D = similar(C, size(A, 1), size(B, 2))
     GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta)
 end
@@ -38,8 +38,8 @@ end
     GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta)
 end
 
-@inline function GemmWithEpilogue!(A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
-    GemmInterface(A, B, C, C, transform, alpha=alpha, beta=beta)
+@inline function GemmWithTransform!(D::CuMatrix{T}, A::CuMatrix{T}, B::CuMatrix{T}, C::CuArray{T}, transform, alpha=T(1.0), beta=T(1.0)) where T
+    GemmInterface(A, B, C, D, transform, alpha=alpha, beta=beta)
 end
 
 @inline function GemmBias(A, B, C, transform, bias)
@@ -115,20 +115,20 @@ function Gemm(A::EClass, B::EClass)
     return ArrayExpr(:call, [Gemm, A, B, C])
 end
 
-function Gemm!(A::EClass, B::EClass, C::EClass)
-    return ArrayExpr(:call, [Gemm!, A, B, C], Union{})
+function Gemm!(D::EClass, A::EClass, B::EClass, C::EClass)
+    return ArrayExpr(:call, [Gemm!, D, A, B, C], Union{})
 end
 
-function GemmWithEpilogue(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [GemmWithEpilogue, A, B, C, epilogue])
+function GemmWithTransform(A::EClass, B::EClass, C::EClass, epilogue)
+    return ArrayExpr(:call, [GemmWithTransform, A, B, C, epilogue], CuMatrix)
 end
 
 function GemmWithAdd(A::EClass, B::EClass, C::EClass, d)
     return ArrayExpr(:call, [GemmWithAdd, A, B, C, d])
 end
 
-function GemmWithEpilogue!(A::EClass, B::EClass, C::EClass, epilogue)
-    return ArrayExpr(:call, [GemmWithEpilogue!, A, B, C, epilogue])
+function GemmWithTransform!(D::EClass, A::EClass, B::EClass, C::EClass, epilogue)
+    return ArrayExpr(:call, [GemmWithTransform!, D, A, B, C, epilogue], CuMatrix)
 end
 
 function GemmKernelsBias(A::EClass, B::EClass, C::EClass, bias)
@@ -144,7 +144,7 @@ function conditional_gemm(op, A, B, C)
 end
 
 # big rewrite rules with custom implementations
-const gemm_properties = @array_theory A B C op d epi begin
+const gemm_properties = @array_theory A B C D op d epi begin
     # TODO: make sure A, B, C is a matrix, and not a scalar!!
     # idea: make mul with scalar separate function? (this supports purely syntactical rewrites)
     # TODO: problem with dynamic rules like this is is that is does not work in the opposite direction
@@ -164,22 +164,19 @@ const gemm_properties = @array_theory A B C op d epi begin
     # TODO: make sure epilogue is scalar
 
     # TODO: fix this ugly Lamda/App stuff by fixing array_rules
-    broadcast(op, Gemm(A, B, C), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [:el, d]))) where istype(d, Number)
-    broadcast(op, d, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, :el]))) where istype(d, Number)
-
-    # TODO: add support for these type of rules
-    # C = Gemm(A, B, C) => Gemm!(A, B, C)
-    copyto!(C, Gemm(A, B, C)) == Gemm!(A, B, C)
+    broadcast(op, Gemm(A, B, C), d) => GemmWithTransform(A, B, C, Lambda(:el, App(op, [:el, d]))) where istype(d, Number)
+    broadcast(op, d, Gemm(A, B, C)) => GemmWithTransform(A, B, C, Lambda(:el, App(op, [d, :el]))) where istype(d, Number)
 
     # fuse operations
-    broadcast(op, Gemm(A, B, C)) => GemmWithEpilogue(A, B, C, op)
-    broadcast(op, GemmWithEpilogue(A, B, C, epi), d) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d]))) where istype(d, Number)
-    broadcast(op, d, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])]))) where istype(d, Number)
-    broadcast(op, GemmWithEpilogue(A, B, C, epi)) => GemmWithEpilogue(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
+    broadcast(op, Gemm(A, B, C)) => GemmWithTransform(A, B, C, op)
+    broadcast(op, GemmWithTransform(A, B, C, epi), d) => GemmWithTransform(A, B, C, Lambda(:el, App(op, [App(epi, [:el]), d]))) where istype(d, Number)
+    broadcast(op, d, GemmWithTransform(A, B, C, epi)) => GemmWithTransform(A, B, C, Lambda(:el, App(op, [d, App(epi, [:el])]))) where istype(d, Number)
+    broadcast(op, GemmWithTransform(A, B, C, epi)) => GemmWithTransform(A, B, C, Lambda(:el, App(op, [App(epi, [:el])])))
 
-    # TODO: add support for these type of rules
-    # C = GemmWithEpilogue(A, B, C, epi) => GemmWithEpilogue!(A, B, C, epi)
-    copyto!(C, GemmWithEpilogue(A, B, C, epi)) == GemmWithEpilogue!(A, B, C, epi)
+
+    # 3: copyto rules
+    copyto!(D, Gemm(A, B, C)) => Gemm!(D, A, B, C) where (istype(D, CuMatrix))
+    copyto!(D, GemmWithTransform(A, B, C, epi)) => GemmWithTransform!(D, A, B, C, epi) where (istype(D, CuMatrix))
 
     # TODO: add gemm alpha(=0) return rule (only if C is dead tho)
     # Gemm(A, B, C, 1.0, 0,0) == Gemm!(A, B, C); C
@@ -194,8 +191,8 @@ const gpu_intrinsics = [Intrinsic(GlobalRef(Main, :*), 1, [1]),
 operations = Dict{Any, Any}()
 operations[Base.broadcasted] = +Inf
 operations[Base.materialize] = +Inf
-operations[GemmWithEpilogue] = 1
-operations[GemmWithEpilogue!] = 1
+operations[GemmWithTransform] = 1
+operations[GemmWithTransform!] = 1
 operations[Gemm] = 10
 operations[Gemm!] = 10
 #operations[matmul] = 1000

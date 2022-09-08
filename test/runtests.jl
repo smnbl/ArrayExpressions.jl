@@ -31,9 +31,13 @@ end
 # Integration tests
 @info "Performing Intergration Tests..."
 @info "gpu micro benchmarks..."
- #@@test_if "gpu" include("gpu/gpu.jl")
+# @test_if "gpu" include("gpu/gpu.jl")
 # @test_if "flux" include("flux.jl")
 # include("tensat.jl")
 # include("conv2d.jl")
-@info "conv mnist..."
+
+@info "flux networks"
+# FLUX.jl networks
+# @info "conv mnist..."
 include("conv_mnist.jl")
+include("mlp.jl")
