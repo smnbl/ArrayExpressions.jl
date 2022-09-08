@@ -81,6 +81,8 @@ function bench_conv_single(xs, n_samples=100)
     c1 = similar(c)
     c2 = similar(c)
 
+    f(c, xs)
+
     # test correctnes
     CUDA.@sync Base.invokelatest(f_normal, c1, xs)
     CUDA.@sync Base.invokelatest(f_opt_gemm, c2, xs)
