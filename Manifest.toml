@@ -301,9 +301,9 @@ version = "0.1.2"
 
 [[deps.GPUCompiler]]
 deps = ["ExprTools", "InteractiveUtils", "LLVM", "Libdl", "Logging", "TimerOutputs", "UUIDs"]
-path = "test/gpu/GPUCompiler.jl"
+git-tree-sha1 = "ebb892e1df16040a845e1d11087e4fbfe10323a8"
 uuid = "61eb1bfa-7361-4325-ad38-22787b887f55"
-version = "0.16.3"
+version = "0.16.4"
 
 [[deps.GemmKernels]]
 deps = ["CUDA", "ForwardDiff", "KernelAbstractions", "LLVM", "LinearAlgebra"]
