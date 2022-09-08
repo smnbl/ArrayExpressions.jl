@@ -23,7 +23,7 @@ end
 # Unit tests
 @info "Performing Unit Tests..."
 @test_if "rules" include("rules.jl")
-@test_if "injection" include("injection.jl")
+#@test_if "injection" include("injection.jl")
 
 @info "gpu micro benchmarks..."
 # @test_if "gpu" include("gpu/gpu.jl")
