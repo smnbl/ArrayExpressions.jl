@@ -59,10 +59,12 @@ end
     a_layout = GemmKernels.BLAS.global_layout(typeof(A), Val(false))
     b_layout = GemmKernels.BLAS.global_layout(typeof(B), Val(false))
 
+    is_broadcast_c = d === 1
+
     conf = GemmKernels.get_config(
             gemm_shape = (M = m, N = n, K = k),
             # TODO: gemmkernels interface changes here in latest version: .., eltype(C)}
-            operator = Operator.SIMTOp,
+            operator = Operator.WMMAOp{16, 16, 16, eltype(C)},
 
             global_a_layout = a_layout,
             global_b_layout = b_layout,
@@ -76,7 +78,7 @@ end
 
             is_a_col_major = true,
             is_b_col_major = true,
-            is_broadcast_c = d === 1,
+            is_broadcast_c = is_broadcast_c,
                                 )
     GemmKernels.matmul(A, B, C, D, conf;
                 # TODO: prologues, bias stuff

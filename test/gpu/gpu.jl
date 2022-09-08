@@ -18,20 +18,22 @@ const (M, N, K) = (512, 512, 512)
 
 cache = ArrayAbstractions.CodeCache()
 
+T = Float16
+
 function a()
-    CuArray(rand(Float32, (M, K)))
+    CuArray(rand(T, (M, K)))
 end
 
 function b()
-    CuArray(rand(Float32, (K, N)))
+    CuArray(rand(T, (K, N)))
 end
 
 function c()
-    CuArray(rand(Float32, (M, N)))
+    CuArray(rand(T, (M, N)))
 end
 
 function d()
-    CuArray(rand(Float32, (M, N)))
+    CuArray(rand(T, (M, N)))
 end
 
 # simple gemm design example
@@ -137,6 +139,35 @@ function gemm_broadcasted()
 
     return before, after
 end
+
+function test_broadcast()
+    A = a()
+    B = b()
+    C_flat = similar(A, size(A, 1))
+
+    D1 = broadcast(+, A * B, C_flat)
+
+    D2 = similar(D1)
+    GemmInterface(A, B, C_flat, D2, identity)
+
+    println(D1 - D2)
+    @assert isapprox(Array(D1), Array(D2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
+end
+
+function test_gemm()
+    A = a()
+    B = b()
+    C = c()
+
+    D1 = A * B + C
+
+    D2 = similar(D1)
+    GemmInterface(A, B, C, D2, identity)
+
+    println(D1 - D2)
+    @assert isapprox(Array(D1), Array(D2), rtol=sqrt(sqrt(eps(Float16))), nans=true)
+end
+
 
 ################################################################################################################################
 function subcall(A, B, C)
